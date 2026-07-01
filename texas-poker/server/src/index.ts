@@ -275,6 +275,33 @@ io.on('connection', (socket) => {
     console.log(`[重开] 房间 ${roomCode} 房主重新开始游戏`);
   });
 
+  // 房主继续牌局（保持积分和借入手数，直接开新局）
+  socket.on('continue_game', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || room.hostId !== playerId) {
+      socket.emit('error', { message: '只有房主可以继续牌局' });
+      return;
+    }
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) {
+      socket.emit('error', { message: '游戏未在进行中' });
+      return;
+    }
+    try {
+      controller.continueGame();
+      const updatedRoom = roomManager.toRoomListItem(room);
+      io.to(roomCode).emit('room_updated', { room: updatedRoom });
+      console.log(`[继续] 房间 ${roomCode} 房主继续牌局（保留积分）`);
+    } catch (e: any) {
+      socket.emit('error', { message: e?.message || '无法继续牌局' });
+    }
+  });
+
   // 玩家发送弹幕
   socket.on('send_danmaku', (data: { text: string; color?: string }) => {
     const roomCode = playerRoomMap.get(socket.id);

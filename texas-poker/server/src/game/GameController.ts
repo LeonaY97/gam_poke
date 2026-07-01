@@ -838,6 +838,36 @@ export class GameController {
   }
 
   /**
+   * 房主继续牌局：保持当前积分和借入手数，直接开新的一局。
+   * 与 restartGame 的区别：不重置筹码和借入次数，不清空 handHistory（保留累计历史）。
+   * 适用于"最终清算后继续玩"的场景——玩家想看清算数据后接着原班配置继续。
+   */
+  continueGame(): void {
+    // 清理当前局的状态（不重置玩家筹码）
+    if (this.turnTimer) clearTimeout(this.turnTimer);
+    if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    this.pendingBorrowers.clear();
+    this.pendingHandResultAcks.clear();
+    this.lastHandResult = null;
+
+    // 仅保留筹码 > 0 的玩家参与下一手（与 resetForNewRound 逻辑一致）
+    const playersWithChips = this.getPlayersArray().filter(p => p.chips > 0);
+    if (playersWithChips.length < 2) {
+      // 不足 2 人无法继续，由调用方处理错误
+      throw new Error('剩余可继续玩家不足 2 人');
+    }
+
+    // dealer 顺时针轮转一位
+    const prevDealer = this.game.dealerIndex;
+    const prevRound = this.game.round;
+    this.game = this.createGame();
+    this.game.round = prevRound + 1;
+    this.game.dealerIndex = (prevDealer + 1) % playersWithChips.length;
+
+    this.startNewHand();
+  }
+
+  /**
    * 玩家做出借入决策（借入或旁观）后调用。
    * 当所有待借入玩家都决策完，触发下一局。
    */

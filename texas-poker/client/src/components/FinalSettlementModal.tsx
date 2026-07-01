@@ -6,10 +6,9 @@ import type { FinalSettlementData } from '../types/game';
 interface FinalSettlementModalProps {
   data: FinalSettlementData;
   isHost: boolean;
-  onClose: () => void;
 }
 
-export default function FinalSettlementModal({ data, isHost, onClose }: FinalSettlementModalProps) {
+export default function FinalSettlementModal({ data, isHost }: FinalSettlementModalProps) {
   const [showHistory, setShowHistory] = useState(false);
   const { getSocket } = useSocket();
   const playerId = useGameStore(s => s.playerId);
@@ -17,18 +16,28 @@ export default function FinalSettlementModal({ data, isHost, onClose }: FinalSet
   // 按净收益降序排列
   const sortedPlayers = [...data.players].sort((a, b) => b.netProfit - a.netProfit);
 
+  // 房主：继续牌局（保持积分和借入手数，直接开新局）
+  const handleContinue = () => {
+    const ws = getSocket();
+    if (!ws?.connected) return;
+    ws.emit('continue_game');
+    // 服务端 startNewHand 会广播 game_started，前端收到后自动关闭本面板
+  };
+
+  // 房主：重新开始（沿用配置，重置筹码和借入手数）
   const handleRestart = () => {
     const ws = getSocket();
     if (!ws?.connected) return;
     ws.emit('restart_game');
-    onClose();
+    // 服务端 startNewHand 会广播 game_started，前端收到后自动关闭本面板
   };
 
+  // 房主：新开房间（解散当前房间，所有玩家返回首页）
   const handleNewRoom = () => {
-    // 关闭清算，返回首页创建新房间
-    useGameStore.getState().setFinalSettlement(null);
     const ws = getSocket();
-    if (ws) ws.emit('leave_room');
+    if (!ws?.connected) return;
+    // 通知服务端解散房间，服务端会广播 room_disbanded 给所有玩家
+    ws.emit('disband_room');
     useGameStore.getState().reset();
     window.location.href = '/';
   };
@@ -138,30 +147,35 @@ export default function FinalSettlementModal({ data, isHost, onClose }: FinalSet
           )}
         </div>
 
-        {/* 底部操作区 */}
-        <div className="flex-shrink-0 px-5 py-4 border-t border-gray-700 space-y-2">
+        {/* 底部操作区：房主可见三个按钮，非房主显示等待提示且不可关闭 */}
+        <div className="flex-shrink-0 px-5 py-4 border-t border-gray-700">
           {isHost ? (
-            <>
+            <div className="space-y-2">
+              <button
+                onClick={handleContinue}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-green-600 to-green-700 text-white font-bold text-sm hover:from-green-500 hover:to-green-600 transition-all active:scale-95 btn-press"
+              >
+                ▶ 继续牌局（保留积分）
+              </button>
               <button
                 onClick={handleRestart}
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-green-600 to-green-700 text-white font-bold text-sm hover:from-green-500 hover:to-green-600 transition-all active:scale-95"
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-yellow-600 to-yellow-700 text-white font-bold text-sm hover:from-yellow-500 hover:to-yellow-600 transition-all active:scale-95 btn-press"
               >
-                🔄 重新开始（沿用配置）
+                🔄 重新开始（重置积分）
               </button>
               <button
                 onClick={handleNewRoom}
-                className="w-full py-2.5 rounded-xl bg-gray-700 text-gray-300 font-semibold text-sm hover:bg-gray-600 transition-colors"
+                className="w-full py-2.5 rounded-xl bg-gray-700 text-gray-300 font-semibold text-sm hover:bg-gray-600 transition-colors btn-press"
               >
                 🏠 新开房间
               </button>
-            </>
-          ) : null}
-          <button
-            onClick={onClose}
-            className="w-full py-2 rounded-xl bg-gray-700/50 text-gray-400 text-xs hover:text-gray-300"
-          >
-            关闭
-          </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2 py-3 text-gray-400 text-sm">
+              <div className="w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+              <span>等待房主操作中...</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

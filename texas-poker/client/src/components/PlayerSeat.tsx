@@ -4,8 +4,8 @@ interface PlayerSeatProps {
   player: Player;
   isCurrentPlayer: boolean;
   isDealer: boolean;
-  /** 该玩家的位置标识：'D'=庄家, 'SB'=小盲, 'BB'=大盲, null=普通 */
-  positionLabel: 'D' | 'SB' | 'BB' | null;
+  /** 该玩家的位置标识：BTN/SB/BB/UTG/UTG+1/UTG+2/MP/HJ/CO，null=无（旁观/未参与） */
+  positionLabel: string | null;
   /** 当前是否轮到该玩家行动 */
   isActiveTurn: boolean;
   /** 该玩家本轮的下注金额 */
@@ -44,12 +44,22 @@ export default function PlayerSeat({
     return null;
   })();
 
-  // 位置标识颜色：庄家白底黑字，小盲蓝，大盲红
+  // 位置标识颜色：按位置重要性分色
+  // BTN=白底黑字（庄家）、SB=蓝、BB=红、UTG系列=紫、MP=青、HJ=橙、CO=绿
   const positionBadge = (() => {
-    if (positionLabel === 'D') return { text: 'D', color: 'bg-white text-gray-900' };
-    if (positionLabel === 'SB') return { text: 'SB', color: 'bg-blue-600 text-white' };
-    if (positionLabel === 'BB') return { text: 'BB', color: 'bg-red-600 text-white' };
-    return null;
+    if (!positionLabel) return null;
+    const colorMap: Record<string, string> = {
+      'BTN':  'bg-white text-gray-900',
+      'SB':   'bg-blue-600 text-white',
+      'BB':   'bg-red-600 text-white',
+      'UTG':  'bg-purple-600 text-white',
+      'UTG+1':'bg-purple-500 text-white',
+      'UTG+2':'bg-purple-400 text-white',
+      'MP':   'bg-cyan-600 text-white',
+      'HJ':   'bg-orange-600 text-white',
+      'CO':   'bg-green-600 text-white',
+    };
+    return { text: positionLabel, color: colorMap[positionLabel] || 'bg-gray-600 text-white' };
   })();
 
   return (
@@ -63,7 +73,7 @@ export default function PlayerSeat({
     >
       {/* 位置标识（左上角） */}
       {positionBadge && !isFolded && (
-        <div className={`absolute -top-2 -left-2 text-[8px] sm:text-[9px] font-bold px-1.5 py-0.5 rounded-full ${positionBadge.color}`}>
+        <div className={`absolute -top-2 left-1/2 -translate-x-1/2 text-[8px] sm:text-[9px] font-bold px-1.5 py-0.5 rounded-full whitespace-nowrap shadow-md ${positionBadge.color}`}>
           {positionBadge.text}
         </div>
       )}

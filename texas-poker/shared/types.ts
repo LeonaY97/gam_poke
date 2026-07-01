@@ -178,6 +178,7 @@ export interface ClientToServerEvents {
   ack_hand_result: () => void;
   request_final_settlement: () => void;
   restart_game: () => void;
+  continue_game: () => void;
   send_danmaku: (data: { text: string; color?: string }) => void;
   start_game: (data: { roomCode: string }) => void;
   player_action: (data: { action: PlayerAction; amount?: number }, callback: (res: { success: boolean; error?: string }) => void) => void;
