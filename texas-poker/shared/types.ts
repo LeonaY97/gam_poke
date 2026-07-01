@@ -50,6 +50,8 @@ export interface BetRecord {
   action: PlayerAction;
   amount: number;
   phase: GamePhase;
+  /** 仅 raise 记录填充：本次加注的增量（= 新最高下注 - 旧最高下注），用于计算后续最小加注 */
+  raiseDelta?: number;
 }
 
 export type PlayerAction = 'fold' | 'check' | 'call' | 'raise' | 'allin';

@@ -213,12 +213,12 @@ export function getAvailableActions(
   const toCall = highestBet - currentBet;
 
   if (toCall <= 0) {
-    const minRaise = lastRaiseAmount > 0 ? lastRaiseAmount : bigBlind;
+    // 无人下注（可过牌）：不设最小加注限制，允许任意正数（1 起步）
     return {
       canCheck: true,
       canCall: false,
       callAmount: 0,
-      minRaise: Math.min(minRaise, playerChips),
+      minRaise: Math.min(1, playerChips),
       maxRaise: playerChips,
       canAllIn: playerChips > 0,
       timeout: 40,
@@ -237,7 +237,8 @@ export function getAvailableActions(
     };
   }
 
-  const minRaise = Math.max(highestBet + (lastRaiseAmount || bigBlind), highestBet + bigBlind);
+  // 有人下注：最小加注 = 当前最高下注 + 上一次加注增量（至少一个大盲）
+  const minRaise = highestBet + (lastRaiseAmount > 0 ? lastRaiseAmount : bigBlind);
 
   return {
     canCheck: false,

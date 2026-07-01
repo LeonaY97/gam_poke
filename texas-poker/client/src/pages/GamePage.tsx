@@ -11,6 +11,7 @@ import PlayerDetailPanel from '../components/PlayerDetailPanel';
 import RoundTransitionOverlay from '../components/RoundTransitionOverlay';
 import FinalSettlementModal from '../components/FinalSettlementModal';
 import DanmakuBar from '../components/DanmakuBar';
+import SettingsModal from '../components/SettingsModal';
 import type { RoomListItem, Player, GamePlayer, BetRecord } from '../types/game';
 
 /**
@@ -57,6 +58,7 @@ export default function GamePage() {
   const borrowRequest = useGameStore(s => s.borrowRequest);
   const finalSettlement = useGameStore(s => s.finalSettlement);
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const connected = useGameStore(s => s.connected);
   const serverUrl = useGameStore(s => s.serverUrl);
 
@@ -105,6 +107,12 @@ export default function GamePage() {
   const myIndex = players.findIndex(p => p.id === playerId);
   const dealerIndex = room?.game?.dealerIndex ?? 0;
   const currentPlayerId = useGameStore(s => s.currentPlayerId);
+  const turnOptions = useGameStore(s => s.turnOptions);
+
+  // 是否需要显示"等待其他玩家"：牌局进行中 + 不是自己的回合 + 不在结算
+  const isWaitingForOthers = gamePhase !== 'showdown' && gamePhase !== 'waiting'
+    && currentPlayerId !== playerId
+    && !turnOptions;
   // 游戏中的玩家状态（含本轮下注等）
   const gamePlayers = room?.game?.players || [];
 
@@ -243,13 +251,42 @@ export default function GamePage() {
       {/* 顶部信息栏 */}
       <div className="absolute top-0 left-0 right-0 bg-black/30 backdrop-blur-sm px-3 py-2 flex items-center justify-between z-40">
         <button onClick={handleLeave} className="text-gray-400 hover:text-white text-sm px-2 py-1">← 离开</button>
-        <div className="flex items-center gap-3 text-sm">
+        <div className="flex items-center gap-2 text-sm">
           <span className="text-gray-400">第 <span className="text-white font-bold">{room?.game?.round || 1}</span> 局</span>
           <span className="text-gray-400">{phaseLabels[gamePhase] || '等待'}</span>
           <span key={pot} className="text-yellow-400 font-bold pot-pulse inline-block">底池 {pot}</span>
         </div>
-        <div className="w-10" />
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => window.location.reload()}
+            className="text-gray-400 hover:text-white text-xs px-2 py-1 rounded border border-gray-600/50 hover:border-gray-400 transition-colors"
+            title="刷新页面（重连牌局）"
+          >
+            🔄
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="text-gray-400 hover:text-yellow-400 text-xs px-2 py-1 rounded border border-gray-600/50 hover:border-yellow-500 transition-colors"
+            title="声音设置"
+          >
+            ⚙️
+          </button>
+        </div>
       </div>
+
+      {/* 等待其他玩家提示条 */}
+      {isWaitingForOthers && (
+        <div className="absolute top-10 left-0 right-0 z-40 flex justify-center pointer-events-none">
+          <div className="bg-black/50 backdrop-blur-sm border border-yellow-500/30 rounded-full px-4 py-1.5 flex items-center gap-2 shadow-lg">
+            <div className="flex gap-1">
+              <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            <span className="text-yellow-300 text-xs font-medium">等待其他玩家行动...</span>
+          </div>
+        </div>
+      )}
 
       {/* 牌桌区域 */}
       <div className="relative w-full h-screen pt-14 pb-28">
@@ -404,7 +441,11 @@ export default function GamePage() {
           onClose={() => setSelectedPlayer(null)}
         />
       )}
-      <ActionBar />
+      {/* 音效设置弹窗 */}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {/* 操作栏 */}
+      {inGame && turnOptions && <ActionBar />}
       <DanmakuBar />
       {handResult && <HandResultView result={handResult} onClose={() => useGameStore.getState().setHandResult(null)} />}
       {finalSettlement && (

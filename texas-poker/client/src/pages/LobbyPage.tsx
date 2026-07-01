@@ -105,7 +105,8 @@ export default function LobbyPage() {
   const isRoomFull = players.length >= room.settings.maxPlayers;
   const canStart = isRoomFull;
 
-  const shareUrl = `${window.location.origin}${window.location.port ? ':' + window.location.port : ''}/?room=${room.id}`;
+  // window.location.origin 已含端口，无需再拼
+  const shareUrl = `${window.location.origin}/?room=${room.id}`;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 p-4">

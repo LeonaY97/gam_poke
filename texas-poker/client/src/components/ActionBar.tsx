@@ -6,9 +6,11 @@ import type { PlayerAction } from '../types/game';
 export default function ActionBar() {
   const turnOptions = useGameStore(s => s.turnOptions);
   const countdown = useGameStore(s => s.countdown);
+  const room = useGameStore(s => s.room);
   const [raiseAmount, setRaiseAmount] = useState(0);
   const [showRaisePanel, setShowRaisePanel] = useState(false);
   const [customInput, setCustomInput] = useState('');
+  const [loading, setLoading] = useState(false);
   const { getSocket } = useSocket();
 
   // 每次打开加注面板时重置为最小加注
@@ -25,18 +27,21 @@ export default function ActionBar() {
     const ws = getSocket();
     if (!ws) return;
 
+    setLoading(true);
+    setShowRaisePanel(false);
+
     ws.emit('player_action', { action, amount: amount || 0 }, (res: any) => {
+      setLoading(false);
       if (!res.success) {
         alert(res.error || '操作失败');
       }
     });
-
-    setShowRaisePanel(false);
   };
 
   const minRaise = turnOptions.minRaise || 0;
   const maxRaise = turnOptions.maxRaise || 0;
-  const bigBlind = minRaise > 0 ? minRaise : 20; // 兜底
+  // 大盲从房间设置读取（真实值），不再用 minRaise 推断（无人下注时 minRaise=1 不代表大盲）
+  const bigBlind = room?.settings?.bigBlind || 20;
 
   // 生成整数档次快捷按钮：基于大盲的倍数
   const quickAmounts = (() => {
@@ -127,7 +132,7 @@ export default function ActionBar() {
           </button>
           <button
             onClick={() => handleAction('raise', raiseAmount || minRaise)}
-            disabled={raiseAmount < minRaise}
+            disabled={loading || raiseAmount < minRaise}
             className="flex-1 py-3 rounded-xl bg-blue-600 text-white font-bold text-base btn-press hover:bg-blue-500 disabled:opacity-30"
           >
             加注 {raiseAmount || minRaise}
@@ -139,6 +144,17 @@ export default function ActionBar() {
 
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur border-t border-gray-700 p-3 z-50">
+      {loading && (
+        <div className="absolute inset-0 bg-gray-900/60 flex items-center justify-center z-10 rounded-t-xl">
+          <div className="flex items-center gap-2 text-yellow-400">
+            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <span className="text-sm font-bold">操作中...</span>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-1 mb-2">
         <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
           <div
@@ -156,7 +172,8 @@ export default function ActionBar() {
       <div className="grid grid-cols-4 gap-2">
         <button
           onClick={() => handleAction('fold')}
-          className="py-3 rounded-xl bg-red-700 text-white font-bold text-sm hover:bg-red-600 btn-press transition-colors"
+          disabled={loading}
+          className="py-3 rounded-xl bg-red-700 text-white font-bold text-sm hover:bg-red-600 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
         >
           弃牌
         </button>
@@ -164,14 +181,16 @@ export default function ActionBar() {
         {turnOptions.canCheck ? (
           <button
             onClick={() => handleAction('check')}
-            className="py-3 rounded-xl bg-green-700 text-white font-bold text-sm hover:bg-green-600 btn-press transition-colors"
+            disabled={loading}
+            className="py-3 rounded-xl bg-green-700 text-white font-bold text-sm hover:bg-green-600 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             过牌
           </button>
         ) : turnOptions.canCall ? (
           <button
             onClick={() => handleAction('call')}
-            className="py-3 rounded-xl bg-green-700 text-white font-bold text-sm hover:bg-green-600 btn-press transition-colors"
+            disabled={loading}
+            className="py-3 rounded-xl bg-green-700 text-white font-bold text-sm hover:bg-green-600 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             跟注 {turnOptions.callAmount}
           </button>
@@ -181,7 +200,7 @@ export default function ActionBar() {
 
         <button
           onClick={() => setShowRaisePanel(true)}
-          disabled={minRaise <= 0 || maxRaise <= 0}
+          disabled={loading || minRaise <= 0 || maxRaise <= 0}
           className="py-3 rounded-xl bg-blue-700 text-white font-bold text-sm hover:bg-blue-600 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
         >
           加注
@@ -189,7 +208,7 @@ export default function ActionBar() {
 
         <button
           onClick={() => handleAction('allin')}
-          disabled={!turnOptions.canAllIn}
+          disabled={loading || !turnOptions.canAllIn}
           className="py-3 rounded-xl bg-yellow-600 text-black font-bold text-sm hover:bg-yellow-500 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
         >
           All-in

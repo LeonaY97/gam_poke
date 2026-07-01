@@ -15,9 +15,12 @@ export class GameController {
   private broadcastFn: (event: string, data: unknown) => void;
   private privateFn: (playerId: string, event: string, data: unknown) => void;
   private turnTimer: ReturnType<typeof setTimeout> | null = null;
+  private botTimer: ReturnType<typeof setTimeout> | null = null;
   private showdownTimer: ReturnType<typeof setTimeout> | null = null;
   private disconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private botPlayers: Set<string> = new Set();
+  /** 连续 AI 行动计数（用于加速连续 AI 延迟） */
+  private consecutiveBotActions = 0;
   /** 等待借入决策的真人玩家 playerId 集合 */
   private pendingBorrowers: Set<string> = new Set();
   /** 等待确认关闭结算画面的真人玩家 playerId 集合 */
@@ -237,6 +240,9 @@ export class GameController {
       return;
     }
 
+    // 轮到真人玩家，重置连续 AI 计数
+    this.consecutiveBotActions = 0;
+
     const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
     const lastRaiseAmount = this.getLastRaiseAmount();
     const isFirstToAct = this.isFirstToActInRound();
@@ -270,9 +276,14 @@ export class GameController {
   }
 
   private scheduleBotAction(gp: GamePlayer): void {
-    const delay = 800 + Math.random() * 1500;
+    this.consecutiveBotActions++;
+    // 首个 AI 行动 0.8-2.3s，连续第 2+ 个 AI 加速到 0.3-0.8s，减少等待感知
+    const baseDelay = this.consecutiveBotActions <= 1 ? 800 : 300;
+    const randomExtra = this.consecutiveBotActions <= 1 ? 1500 : 500;
+    const delay = baseDelay + Math.random() * randomExtra;
 
-    this.turnTimer = setTimeout(() => {
+    if (this.botTimer) clearTimeout(this.botTimer);
+    this.botTimer = setTimeout(() => {
       this.executeBotAction(gp);
     }, delay);
   }
@@ -283,6 +294,9 @@ export class GameController {
 
     const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
     const toCall = highestBet - gp.totalBet;
+    const lastRaise = this.getLastRaiseAmount();
+    // 最小加注总额（投入总额 = 跟注部分 + 加注增量）
+    const minRaiseTotal = toCall <= 0 ? 1 : highestBet + (lastRaise > 0 ? lastRaise : this.room.settings.bigBlind);
 
     const handStrength = this.evaluateBotHandStrength(gp);
     const random = Math.random();
@@ -311,7 +325,8 @@ export class GameController {
       if (handStrength > 0.6 && random < 0.3) {
         action = 'raise';
         amount = Math.floor(player.chips * (0.2 + random * 0.3));
-        amount = Math.max(amount, toCall + this.room.settings.bigBlind);
+        // 必须满足最小加注总额，否则会校验失败
+        amount = Math.max(amount, minRaiseTotal);
         amount = Math.min(amount, player.chips);
       } else if (handStrength < 0.25 && toCall > this.room.settings.bigBlind * 4 && random < 0.3) {
         action = 'fold';
@@ -320,7 +335,23 @@ export class GameController {
       }
     }
 
-    this.handleAction(gp.playerId, action, amount);
+    // 如果筹码不够做最小加注，降级为 call 或 check
+    if (action === 'raise' && player.chips < minRaiseTotal) {
+      action = toCall > 0 ? 'call' : 'check';
+      amount = 0;
+    }
+
+    const result = this.handleAction(gp.playerId, action, amount);
+    if (!result.success) {
+      // 加注失败兜底：能过牌就过牌，能跟注就跟注，否则弃牌
+      if (toCall <= 0) {
+        this.handleAction(gp.playerId, 'check', 0);
+      } else if (toCall < player.chips) {
+        this.handleAction(gp.playerId, 'call', 0);
+      } else {
+        this.handleAction(gp.playerId, 'fold', 0);
+      }
+    }
   }
 
   private evaluateBotHandStrength(gp: GamePlayer): number {
@@ -344,20 +375,21 @@ export class GameController {
     return strengthMap[result.handRank] || 0.1;
   }
 
+  /** 获取最近一次加注的增量（raiseDelta）。无加注记录返回 0。 */
   private getLastRaiseAmount(): number {
-    let lastRaise = 0;
     for (let i = this.game.betHistory.length - 1; i >= 0; i--) {
-      if (this.game.betHistory[i].action === 'raise') {
-        lastRaise = this.game.betHistory[i].amount;
-        break;
+      const rec = this.game.betHistory[i];
+      if (rec.action === 'raise' && rec.raiseDelta !== undefined) {
+        return rec.raiseDelta;
       }
     }
-    return lastRaise;
+    return 0;
   }
 
+  /** 判断当前是否为本轮第一个行动者（本轮 betHistory 还没有任何记录） */
   private isFirstToActInRound(): boolean {
-    const activePlayers = this.game.players.filter(p => !p.isFolded && !p.isAllIn);
-    return activePlayers.every(p => p.totalBet === activePlayers[0]?.totalBet);
+    const currentPhase = this.game.phase;
+    return !this.game.betHistory.some(rec => rec.phase === currentPhase);
   }
 
   handleAction(playerId: string, action: PlayerAction, amount: number): { success: boolean; error?: string } {
@@ -397,6 +429,18 @@ export class GameController {
       case 'raise': {
         if (amount < toCall) return { success: false, error: '加注金额不能低于跟注金额' };
         if (amount > player.chips) return { success: false, error: '筹码不足' };
+        // 最小加注校验（与 getAvailableActions 逻辑一致）
+        if (toCall <= 0) {
+          // 无人下注：允许任意正数
+          if (amount < 1) return { success: false, error: '加注金额必须大于 0' };
+        } else if (player.chips > toCall) {
+          // 有人下注且筹码够跟注：最小加注 = 最高下注 + 上次加注增量（至少大盲）
+          const lastRaise = this.getLastRaiseAmount();
+          const minRaiseTotal = highestBet + (lastRaise > 0 ? lastRaise : this.room.settings.bigBlind);
+          if (amount < minRaiseTotal) {
+            return { success: false, error: `最小加注到 ${minRaiseTotal}` };
+          }
+        }
         player.chips -= amount;
         gp.totalBet += amount;
         gp.currentBet += (amount - toCall);
@@ -420,6 +464,8 @@ export class GameController {
       action,
       amount,
       phase: this.game.phase,
+      // raise 记录额外存加注增量（= 本次投入 - 跟注部分 = 新最高下注 - 旧最高下注）
+      raiseDelta: action === 'raise' ? Math.max(0, amount - toCall) : undefined,
     });
 
     this.updatePot();
@@ -434,6 +480,8 @@ export class GameController {
       betHistory: this.game.betHistory,
     });
 
+    console.log(`[行动] ${player.nickname} ${action}${amount > 0 ? ' ' + amount : ''} | 筹码:${player.chips} | 底池:${this.game.pot}`);
+
     this.broadcastFn('pot_updated', {
       pot: this.game.pot,
       sidePots: this.game.sidePots,
@@ -441,6 +489,7 @@ export class GameController {
 
     if (this.turnTimer) clearTimeout(this.turnTimer);
     this.checkBettingRoundEnd();
+    return { success: true };
   }
 
   private checkBettingRoundEnd(): void {
@@ -473,8 +522,10 @@ export class GameController {
     this.findNextActivePlayer();
     const nextPlayer = this.game.players[this.game.currentPlayerIndex];
     if (nextPlayer && !nextPlayer.isFolded && !nextPlayer.isAllIn) {
+      console.log(`[轮次] 下一个行动: ${nextPlayer.nickname} (${this.game.phase})`);
       this.sendTurnToPlayer(nextPlayer);
     } else {
+      console.log(`[轮次] 无可用玩家，结束本轮`);
       this.endBettingRound();
     }
   }
@@ -817,6 +868,7 @@ export class GameController {
   restartGame(): void {
     // 清理状态
     if (this.turnTimer) clearTimeout(this.turnTimer);
+    if (this.botTimer) clearTimeout(this.botTimer);
     if (this.showdownTimer) clearTimeout(this.showdownTimer);
     this.pendingBorrowers.clear();
     this.pendingHandResultAcks.clear();
@@ -845,6 +897,7 @@ export class GameController {
   continueGame(): void {
     // 清理当前局的状态（不重置玩家筹码）
     if (this.turnTimer) clearTimeout(this.turnTimer);
+    if (this.botTimer) clearTimeout(this.botTimer);
     if (this.showdownTimer) clearTimeout(this.showdownTimer);
     this.pendingBorrowers.clear();
     this.pendingHandResultAcks.clear();
@@ -1149,6 +1202,7 @@ export class GameController {
 
   destroy(): void {
     if (this.turnTimer) clearTimeout(this.turnTimer);
+    if (this.botTimer) clearTimeout(this.botTimer);
     if (this.showdownTimer) clearTimeout(this.showdownTimer);
     for (const timer of this.disconnectTimers.values()) {
       clearTimeout(timer);
