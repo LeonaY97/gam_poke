@@ -19,8 +19,6 @@ export class GameController {
   private showdownTimer: ReturnType<typeof setTimeout> | null = null;
   private disconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private botPlayers: Set<string> = new Set();
-  /** 连续 AI 行动计数（用于加速连续 AI 延迟） */
-  private consecutiveBotActions = 0;
   /** 等待借入决策的真人玩家 playerId 集合 */
   private pendingBorrowers: Set<string> = new Set();
   /** 等待确认关闭结算画面的真人玩家 playerId 集合 */
@@ -240,9 +238,6 @@ export class GameController {
       return;
     }
 
-    // 轮到真人玩家，重置连续 AI 计数
-    this.consecutiveBotActions = 0;
-
     const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
     const lastRaiseAmount = this.getLastRaiseAmount();
     const isFirstToAct = this.isFirstToActInRound();
@@ -276,11 +271,8 @@ export class GameController {
   }
 
   private scheduleBotAction(gp: GamePlayer): void {
-    this.consecutiveBotActions++;
-    // 首个 AI 行动 0.8-2.3s，连续第 2+ 个 AI 加速到 0.3-0.8s，减少等待感知
-    const baseDelay = this.consecutiveBotActions <= 1 ? 800 : 300;
-    const randomExtra = this.consecutiveBotActions <= 1 ? 1500 : 500;
-    const delay = baseDelay + Math.random() * randomExtra;
+    // 每个 AI 至少 2s（2.0s ~ 3.0s），确保玩家能看清操作气泡
+    const delay = 2000 + Math.random() * 1000;
 
     if (this.botTimer) clearTimeout(this.botTimer);
     this.botTimer = setTimeout(() => {
