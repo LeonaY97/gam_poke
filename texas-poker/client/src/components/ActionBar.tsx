@@ -1,0 +1,200 @@
+import { useState, useEffect } from 'react';
+import { useGameStore } from '../stores/gameStore';
+import { useSocket } from '../hooks/useSocket';
+import type { PlayerAction } from '../types/game';
+
+export default function ActionBar() {
+  const turnOptions = useGameStore(s => s.turnOptions);
+  const countdown = useGameStore(s => s.countdown);
+  const [raiseAmount, setRaiseAmount] = useState(0);
+  const [showRaisePanel, setShowRaisePanel] = useState(false);
+  const [customInput, setCustomInput] = useState('');
+  const { getSocket } = useSocket();
+
+  // 每次打开加注面板时重置为最小加注
+  useEffect(() => {
+    if (showRaisePanel && turnOptions) {
+      setRaiseAmount(turnOptions.minRaise || 0);
+      setCustomInput('');
+    }
+  }, [showRaisePanel, turnOptions]);
+
+  if (!turnOptions) return null;
+
+  const handleAction = (action: PlayerAction, amount?: number) => {
+    const ws = getSocket();
+    if (!ws) return;
+
+    ws.emit('player_action', { action, amount: amount || 0 }, (res: any) => {
+      if (!res.success) {
+        alert(res.error || '操作失败');
+      }
+    });
+
+    setShowRaisePanel(false);
+  };
+
+  const minRaise = turnOptions.minRaise || 0;
+  const maxRaise = turnOptions.maxRaise || 0;
+  const bigBlind = minRaise > 0 ? minRaise : 20; // 兜底
+
+  // 生成整数档次快捷按钮：基于大盲的倍数
+  const quickAmounts = (() => {
+    const amounts: number[] = [];
+    // 档次：2BB、3BB、4BB、1/4 底池、1/2 底池、3/4 底池、满仓
+    const pot = useGameStore.getState().pot;
+    const candidates = [
+      bigBlind * 2,
+      bigBlind * 3,
+      bigBlind * 4,
+      Math.floor(pot * 0.25),
+      Math.floor(pot * 0.5),
+      Math.floor(pot * 0.75),
+      maxRaise, // 全部
+    ];
+    for (const a of candidates) {
+      if (a >= minRaise && a <= maxRaise && a > 0 && !amounts.includes(a)) {
+        amounts.push(a);
+      }
+    }
+    // 确保至少有最小加注和最大加注
+    if (amounts.length === 0 && minRaise > 0) amounts.push(minRaise);
+    return amounts.slice(0, 6); // 最多 6 个
+  })();
+
+  // 处理自定义输入
+  const handleCustomSubmit = () => {
+    const v = parseInt(customInput, 10);
+    if (isNaN(v) || v < minRaise) {
+      alert(`最小加注 ${minRaise}`);
+      return;
+    }
+    if (v > maxRaise) {
+      handleAction('raise', maxRaise);
+      return;
+    }
+    handleAction('raise', v);
+  };
+
+  if (showRaisePanel) {
+    return (
+      <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur border-t border-gray-700 p-4 spring-in z-50">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-white text-sm font-semibold">选择加注金额</span>
+          <span className="text-gray-400 text-xs">范围 {minRaise} ~ {maxRaise}</span>
+        </div>
+
+        {/* 档次快捷按钮 */}
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          {quickAmounts.map((a, i) => (
+            <button
+              key={i}
+              onClick={() => setRaiseAmount(a)}
+              className={`py-2.5 rounded-lg text-sm font-bold btn-press transition-colors
+                ${raiseAmount === a ? 'bg-yellow-500 text-black scale-105' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+            >
+              {a}
+            </button>
+          ))}
+        </div>
+
+        {/* 自定义输入 */}
+        <div className="flex items-center gap-2 mb-3">
+          <input
+            type="number"
+            inputMode="numeric"
+            value={customInput}
+            onChange={e => {
+              setCustomInput(e.target.value);
+              const v = parseInt(e.target.value, 10);
+              if (!isNaN(v)) setRaiseAmount(v);
+            }}
+            onKeyDown={e => { if (e.key === 'Enter') handleCustomSubmit(); }}
+            placeholder={`自定义金额 (≥${minRaise})`}
+            className="flex-1 bg-gray-700 text-white rounded-lg px-3 py-2.5 text-sm border border-gray-600 focus:border-yellow-500 focus:outline-none"
+          />
+          <span className="text-yellow-400 font-bold min-w-[60px] text-right">
+            {raiseAmount || minRaise}
+          </span>
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={() => setShowRaisePanel(false)}
+            className="flex-1 py-3 rounded-xl bg-gray-700 text-white font-bold text-base btn-press hover:bg-gray-600"
+          >
+            取消
+          </button>
+          <button
+            onClick={() => handleAction('raise', raiseAmount || minRaise)}
+            disabled={raiseAmount < minRaise}
+            className="flex-1 py-3 rounded-xl bg-blue-600 text-white font-bold text-base btn-press hover:bg-blue-500 disabled:opacity-30"
+          >
+            加注 {raiseAmount || minRaise}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur border-t border-gray-700 p-3 z-50">
+      <div className="flex items-center gap-1 mb-2">
+        <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-1000 ${
+              countdown <= 5 ? 'bg-red-500' : 'bg-yellow-500'
+            }`}
+            style={{ width: `${(countdown / (turnOptions.timeout || 40)) * 100}%` }}
+          />
+        </div>
+        <span className={`text-sm font-bold min-w-[28px] text-center ${countdown <= 5 ? 'text-red-400' : 'text-yellow-400'}`}>
+          {countdown}s
+        </span>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2">
+        <button
+          onClick={() => handleAction('fold')}
+          className="py-3 rounded-xl bg-red-700 text-white font-bold text-sm hover:bg-red-600 btn-press transition-colors"
+        >
+          弃牌
+        </button>
+
+        {turnOptions.canCheck ? (
+          <button
+            onClick={() => handleAction('check')}
+            className="py-3 rounded-xl bg-green-700 text-white font-bold text-sm hover:bg-green-600 btn-press transition-colors"
+          >
+            过牌
+          </button>
+        ) : turnOptions.canCall ? (
+          <button
+            onClick={() => handleAction('call')}
+            className="py-3 rounded-xl bg-green-700 text-white font-bold text-sm hover:bg-green-600 btn-press transition-colors"
+          >
+            跟注 {turnOptions.callAmount}
+          </button>
+        ) : (
+          <div className="py-3 rounded-xl bg-gray-800 text-gray-500 font-bold text-sm text-center">-</div>
+        )}
+
+        <button
+          onClick={() => setShowRaisePanel(true)}
+          disabled={minRaise <= 0 || maxRaise <= 0}
+          className="py-3 rounded-xl bg-blue-700 text-white font-bold text-sm hover:bg-blue-600 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          加注
+        </button>
+
+        <button
+          onClick={() => handleAction('allin')}
+          disabled={!turnOptions.canAllIn}
+          className="py-3 rounded-xl bg-yellow-600 text-black font-bold text-sm hover:bg-yellow-500 btn-press transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          All-in
+        </button>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,11 @@
+{
+  "name": "texas-poker",
+  "private": true,
+  "scripts": {
+    "start": "bash start.sh",
+    "server": "cd server && npx tsx src/index.ts",
+    "client": "cd client && npx vite --host 0.0.0.0",
+    "build": "cd client && npm run build",
+    "ngrok": "ngrok http 3001"
+  }
+}
