@@ -144,16 +144,15 @@ export function useSocket() {
       }
     });
 
-    socket.on('action_result', (data: { playerId: string; playerName: string; action: string; amount: number; chips: number; gamePlayers?: any[]; betHistory?: any[] }) => {
+    socket.on('action_result', (data: { playerId: string; playerName: string; action: string; amount: number; chips: number; pot: number; currentBet: number; isFolded: boolean; isAllIn: boolean; gamePlayers?: any[] }) => {
       const st = useGameStore.getState();
       st.setLastAction({ playerId: data.playerId, playerName: data.playerName, action: data.action as any, amount: data.amount });
-      // 根据操作类型播放对应音效
+      st.setPot(data.pot);
       const actionSounds: Record<string, SoundType> = {
         fold: 'fold', check: 'check', call: 'call', raise: 'raise', allin: 'allin', all_in: 'allin',
       };
       const sound = actionSounds[data.action];
       if (sound) playSound(sound);
-      // 行动者完成操作后清除自己的操作选项（currentPlayerId 由 turn_changed 更新）
       if (data.playerId === st.playerId) {
         st.setTurnOptions(null);
         st.setCountdown(0);
@@ -161,12 +160,11 @@ export function useSocket() {
       }
       const r = st.room;
       if (r) {
-        // 更新玩家筹码，同时更新 room.game 的 players 和 betHistory（供玩家详情面板使用）
         const updatedPlayers = r.players.map(p => p.id === data.playerId ? { ...p, chips: data.chips } : p);
         const updatedGame = r.game ? {
           ...r.game,
+          pot: data.pot,
           players: data.gamePlayers || r.game.players,
-          betHistory: data.betHistory || r.game.betHistory,
         } : r.game;
         st.setRoom({ ...r, players: updatedPlayers, game: updatedGame });
       }

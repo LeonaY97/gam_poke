@@ -494,8 +494,17 @@ export class GameController {
       action,
       amount,
       chips: player.chips,
-      gamePlayers: this.game.players,
-      betHistory: this.game.betHistory,
+      pot: this.game.pot,
+      currentBet: gp.totalBet,
+      isFolded: gp.isFolded,
+      isAllIn: gp.isAllIn,
+      gamePlayers: this.game.players.map(p => ({
+        playerId: p.playerId,
+        isFolded: p.isFolded,
+        isAllIn: p.isAllIn,
+        totalBet: p.totalBet,
+        isActive: p.isActive,
+      })),
     });
 
     console.log(`[行动] ${player.nickname} ${action}${amount > 0 ? ' ' + amount : ''} | 筹码:${player.chips} | 底池:${this.game.pot}`);

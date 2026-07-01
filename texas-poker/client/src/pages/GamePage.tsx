@@ -113,6 +113,13 @@ export default function GamePage() {
   const isWaitingForOthers = gamePhase !== 'showdown' && gamePhase !== 'waiting'
     && currentPlayerId !== playerId
     && !turnOptions;
+
+  // 当前正在行动/思考的玩家名字
+  const currentPlayerName = useMemo(() => {
+    if (!currentPlayerId) return '';
+    return players.find(p => p.id === currentPlayerId)?.nickname || '';
+  }, [currentPlayerId, players]);
+
   // 游戏中的玩家状态（含本轮下注等）
   const gamePlayers = room?.game?.players || [];
 
@@ -333,9 +340,10 @@ export default function GamePage() {
 
         {/* 其他玩家座位 */}
         {seatMap.map((player) => {
-          if (player.id === playerId) return null; // 自己渲染在底部
+          if (player.id === playerId) return null;
           const pos = getPlayerSeatPosition(player.posIndex, players.length);
           const isMyTurn = currentPlayerId === player.id;
+          const isThinking = isMyTurn && player.id.startsWith('bot_') && !turnOptions;
           return (
             <div key={player.id} onClick={() => setSelectedPlayer(player)} className="cursor-pointer">
               <PlayerSeat
@@ -343,7 +351,8 @@ export default function GamePage() {
                 isCurrentPlayer={false}
                 isDealer={player.seatIndex === dealerIndex}
                 positionLabel={getPositionLabel(player.seatIndex)}
-                isActiveTurn={isMyTurn}
+                isActiveTurn={isMyTurn && !isThinking}
+                isThinking={isThinking}
                 currentBet={getPlayerBet(player.id)}
                 isFolded={isPlayerFolded(player.id)}
                 position={pos}

@@ -8,6 +8,8 @@ interface PlayerSeatProps {
   positionLabel: string | null;
   /** 当前是否轮到该玩家行动 */
   isActiveTurn: boolean;
+  /** 是否为 AI 正在思考中 */
+  isThinking?: boolean;
   /** 该玩家本轮的下注金额 */
   currentBet?: number;
   /** 该玩家是否已弃牌 */
@@ -21,6 +23,7 @@ export default function PlayerSeat({
   isDealer,
   positionLabel,
   isActiveTurn,
+  isThinking = false,
   currentBet = 0,
   isFolded = false,
   position,
@@ -29,7 +32,7 @@ export default function PlayerSeat({
   const bgColor = isFolded
     ? 'bg-gray-900/60 border-gray-700 opacity-45'
     : player.isConnected
-      ? isActiveTurn
+      ? isActiveTurn || isThinking
         ? 'bg-yellow-500/30 border-yellow-400 shadow-lg shadow-yellow-500/30 turn-glow'
         : isCurrentPlayer
           ? 'bg-green-500/20 border-green-400'
@@ -39,6 +42,7 @@ export default function PlayerSeat({
   const statusBadge = (() => {
     if (isFolded) return { text: '已弃牌', color: 'bg-gray-600' };
     if (!player.isConnected) return { text: '离线', color: 'bg-gray-500' };
+    if (isThinking) return { text: '思考中', color: 'bg-blue-500' };
     if (isActiveTurn) return { text: '行动中', color: 'bg-yellow-500 animate-pulse' };
     if (isCurrentPlayer) return { text: '你', color: 'bg-green-500' };
     return null;
@@ -78,9 +82,9 @@ export default function PlayerSeat({
         </div>
       )}
 
-      {/* 行动中标识（右上角脉冲点） */}
-      {isActiveTurn && !isFolded && (
-        <div className="absolute -top-2 -right-2 w-3 h-3 bg-yellow-400 rounded-full animate-ping" />
+      {/* 行动中/思考中标识（右上角脉冲点） */}
+      {(isActiveTurn || isThinking) && !isFolded && (
+        <div className={`absolute -top-2 -right-2 w-3 h-3 rounded-full animate-ping ${isThinking ? 'bg-blue-400' : 'bg-yellow-400'}`} />
       )}
 
       <div className="w-7 h-7 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-gray-500 to-gray-700 flex items-center justify-center text-white font-bold text-[10px] sm:text-sm mb-0.5">
