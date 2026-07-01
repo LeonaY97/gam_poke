@@ -8,6 +8,10 @@ import {
   getBestHand, compareHands, getNextPhase, getCommunityCardsCount,
   getAvailableActions, getHandValue,
 } from '../engine/deck';
+import {
+  AI_PERSONA_POOL, adjustHandStrengthByPersona,
+  getPersonaActionBias,
+} from '../ai/aiPersonas';
 
 export class GameController {
   private room: Room;
@@ -284,50 +288,73 @@ export class GameController {
     const player = this.getPlayer(gp.playerId);
     if (!player || gp.isFolded || gp.isAllIn) return;
 
+    const persona = AI_PERSONA_POOL.find(p => p.id === player.aiPersonaId) || null;
+
     const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
     const toCall = highestBet - gp.totalBet;
     const lastRaise = this.getLastRaiseAmount();
-    // 最小加注总额（投入总额 = 跟注部分 + 加注增量）
     const minRaiseTotal = toCall <= 0 ? 1 : highestBet + (lastRaise > 0 ? lastRaise : this.room.settings.bigBlind);
 
-    const handStrength = this.evaluateBotHandStrength(gp);
+    let handStrength = this.evaluateBotHandStrength(gp);
+
+    // 根据人设调整手牌强度感知
+    if (persona) {
+      handStrength = adjustHandStrengthByPersona(
+        handStrength,
+        persona,
+        this.game.phase === 'waiting' ? 'preflop' : this.game.phase as 'preflop' | 'flop' | 'turn' | 'river',
+      );
+    }
+
+    const bias = persona ? getPersonaActionBias(persona) : null;
     const random = Math.random();
 
     let action: PlayerAction;
     let amount = 0;
 
     if (toCall <= 0) {
-      if (handStrength > 0.7 && random < 0.4) {
+      const raiseChance = bias ? 0.4 * bias.raiseBias : 0.4;
+      const foldChance = bias ? 0.15 * bias.foldBias : 0.15;
+      if (handStrength > 0.7 && random < raiseChance) {
         action = 'raise';
-        amount = Math.floor(player.chips * (0.3 + random * 0.3));
+        const raiseRatio = bias ? (0.3 + random * 0.3) * Math.min(1.5, bias.raiseBias) : 0.3 + random * 0.3;
+        amount = Math.floor(player.chips * Math.min(0.9, raiseRatio));
         amount = Math.max(amount, this.room.settings.bigBlind * 2);
         amount = Math.min(amount, player.chips);
-      } else if (handStrength < 0.3 && random < 0.15) {
+      } else if (handStrength < 0.3 && random < foldChance) {
         action = 'fold';
       } else {
         action = 'check';
       }
     } else if (toCall >= player.chips) {
-      if (handStrength > 0.5 || random < 0.3) {
+      const allinChance = bias ? Math.min(0.9, 0.3 + 0.2 * bias.callBias) : 0.5;
+      if (handStrength > 0.5 || random < allinChance) {
         action = 'allin';
       } else {
         action = 'fold';
       }
     } else {
-      if (handStrength > 0.6 && random < 0.3) {
+      const raiseChance = bias ? (0.3 * bias.raiseBias) : 0.3;
+      const bluffRaise = bias ? Math.min(0.3, 0.1 * bias.bluffBias) : 0;
+      const foldThreshold = bias ? 0.25 * bias.foldBias : 0.25;
+      if (handStrength > 0.6 && random < raiseChance) {
         action = 'raise';
-        amount = Math.floor(player.chips * (0.2 + random * 0.3));
-        // 必须满足最小加注总额，否则会校验失败
+        const raiseRatio = bias ? (0.2 + random * 0.3) * Math.min(1.5, bias.raiseBias) : 0.2 + random * 0.3;
+        amount = Math.floor(player.chips * Math.min(0.8, raiseRatio));
         amount = Math.max(amount, minRaiseTotal);
         amount = Math.min(amount, player.chips);
-      } else if (handStrength < 0.25 && toCall > this.room.settings.bigBlind * 4 && random < 0.3) {
+      } else if (handStrength < 0.4 && random < bluffRaise) {
+        action = 'raise';
+        amount = Math.floor(player.chips * (0.15 + random * 0.2));
+        amount = Math.max(amount, minRaiseTotal);
+        amount = Math.min(amount, player.chips);
+      } else if (handStrength < foldThreshold && toCall > this.room.settings.bigBlind * 4 && random < 0.3) {
         action = 'fold';
       } else {
         action = 'call';
       }
     }
 
-    // 如果筹码不够做最小加注，降级为 call 或 check
     if (action === 'raise' && player.chips < minRaiseTotal) {
       action = toCall > 0 ? 'call' : 'check';
       amount = 0;
@@ -335,7 +362,6 @@ export class GameController {
 
     const result = this.handleAction(gp.playerId, action, amount);
     if (!result.success) {
-      // 加注失败兜底：能过牌就过牌，能跟注就跟注，否则弃牌
       if (toCall <= 0) {
         this.handleAction(gp.playerId, 'check', 0);
       } else if (toCall < player.chips) {

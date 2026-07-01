@@ -28,6 +28,8 @@ export interface Player {
   isHost: boolean;
   /** 借入次数：开局默认 1（水下一手），筹码归零后可再借 */
   borrowCount: number;
+  /** AI 人设 ID，仅 AI 玩家有此字段 */
+  aiPersonaId?: string;
 }
 
 export interface GamePlayer {

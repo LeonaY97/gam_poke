@@ -63,10 +63,9 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <AudioSettingsButton />
       <Routes>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/room/:roomId" element={<LobbyPage />} />
+        <Route path="/" element={<><AudioSettingsButton /><HomePage /></>} />
+        <Route path="/room/:roomId" element={<><AudioSettingsButton /><LobbyPage /></>} />
         <Route path="/room/:roomId/game" element={<GamePage />} />
       </Routes>
     </BrowserRouter>

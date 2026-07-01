@@ -179,6 +179,7 @@ export function useSocket() {
     socket.on('hand_result', (data: HandResult) => {
       const st = useGameStore.getState();
       st.setHandResult(data);
+      st.setGamePhase('showdown');
       st.setTurnOptions(null);
       st.setCurrentPlayerId(null);
       st.setCountdown(0);

@@ -1,6 +1,7 @@
 import { Room, RoomListItem, Player, RoomSettings } from '../../shared/types';
 import { generateRoomCode } from '../engine/deck';
 import { GameController } from './GameController';
+import { selectAIPersonas } from '../ai/aiPersonas';
 
 export class RoomManager {
   private rooms: Map<string, Room> = new Map();
@@ -91,21 +92,23 @@ export class RoomManager {
     const room = this.rooms.get(roomCode);
     if (!room) return [];
 
-    const botNames = ['🤖 小刚', '🤖 阿强', '🤖 老王', '🤖 小明', '🤖 大壮', '🤖 阿花', '🤖 小李', '🤖 老张'];
+    const personas = selectAIPersonas(count);
     const bots: Player[] = [];
 
     for (let i = 0; i < count; i++) {
       const playerCount = room.players instanceof Map ? room.players.size : Object.keys(room.players).length;
+      const persona = personas[i];
       const botId = `bot_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
       const bot: Player = {
         id: botId,
-        nickname: botNames[i % botNames.length],
+        nickname: persona.nickname,
         chips: room.settings.initialChips,
         seatIndex: playerCount,
         isReady: true,
         isConnected: true,
         isHost: false,
         borrowCount: 1,
+        aiPersonaId: persona.id,
       };
 
       if (room.players instanceof Map) {
