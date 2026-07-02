@@ -73,9 +73,9 @@ body {
   }
 }
 
-/* 弹幕飞行动画 */
+/* 弹幕飞行动画（速度调到最慢：60 秒走完全屏） */
 .danmaku-fly {
-  animation: danmakuFly 6s linear;
+  animation: danmakuFly 60s linear;
 }
 
 @keyframes danmakuFly {
@@ -83,15 +83,15 @@ body {
     opacity: 0;
     transform: translateX(100vw);
   }
-  8% {
+  4% {
     opacity: 1;
   }
-  92% {
+  96% {
     opacity: 1;
   }
   100% {
     opacity: 0;
-    transform: translateX(-100%);
+    transform: translateX(-100vw);
   }
 }
 

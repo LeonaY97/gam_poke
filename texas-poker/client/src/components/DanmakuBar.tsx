@@ -2,41 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import { useSocket } from '../hooks/useSocket';
 import { useGameStore } from '../stores/gameStore';
 
-interface DanmakuItem {
-  id: number;
-  nickname: string;
-  text: string;
-  color: string;
-}
-
-let danmakuIdCounter = 0;
-
 export default function DanmakuBar() {
   const [input, setInput] = useState('');
-  const [danmakus, setDanmakus] = useState<DanmakuItem[]>([]);
   const [showInput, setShowInput] = useState(false);
   const { getSocket } = useSocket();
   const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const ws = getSocket();
-    if (!ws) return;
-    const handler = (data: { playerId: string; nickname: string; text: string; color: string }) => {
-      const item: DanmakuItem = {
-        id: ++danmakuIdCounter,
-        nickname: data.nickname,
-        text: data.text,
-        color: data.color,
-      };
-      setDanmakus(prev => [...prev.slice(-8), item]); // 最多保留9条
-      // 6秒后移除
-      setTimeout(() => {
-        setDanmakus(prev => prev.filter(d => d.id !== item.id));
-      }, 6000);
-    };
-    ws.on('danmaku_received', handler);
-    return () => { ws.off('danmaku_received', handler); };
-  }, [getSocket]);
+  const danmakus = useGameStore((s) => s.danmakus);
 
   useEffect(() => {
     if (showInput) inputRef.current?.focus();
@@ -53,18 +24,26 @@ export default function DanmakuBar() {
 
   return (
     <>
-      {/* 弹幕轨道 */}
-      <div className="fixed top-12 left-0 right-0 z-30 pointer-events-none flex flex-col gap-1 px-2 overflow-hidden">
-        {danmakus.map(d => (
-          <div
-            key={d.id}
-            className="danmaku-fly text-sm font-medium whitespace-nowrap"
-            style={{ color: d.color, textShadow: '0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.8)' }}
-          >
-            <span className="opacity-70 text-xs mr-1">{d.nickname}:</span>
-            {d.text}
-          </div>
-        ))}
+      {/* 弹幕轨道容器：绝对定位，不占据布局空间 */}
+      <div className="fixed top-12 left-0 right-0 z-30 pointer-events-none overflow-hidden" style={{ height: '40vh' }}>
+        {danmakus.map((d, i) => {
+          // 多条弹幕按索引错开轨道，避免重叠
+          const track = (i % 4) * 3; // 0rem, 3rem, 6rem, 9rem
+          return (
+            <div
+              key={d.id}
+              className="danmaku-fly absolute whitespace-nowrap text-xl sm:text-2xl font-bold"
+              style={{
+                top: `${track}rem`,
+                color: d.color,
+                textShadow: '0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.8)',
+              }}
+            >
+              <span className="opacity-70 text-base sm:text-lg mr-1">{d.nickname}:</span>
+              {d.text}
+            </div>
+          );
+        })}
       </div>
 
       {/* 弹幕输入入口 */}

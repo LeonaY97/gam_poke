@@ -309,10 +309,39 @@ export default function GamePage() {
         {/* 社区牌 */}
         <div className="absolute top-[34%] left-1/2 -translate-x-1/2 z-20"><CommunityCards /></div>
 
-        {/* 操作气泡：浮在对应玩家卡片上方 */}
+        {/* 操作气泡：浮在对应玩家卡片上方（自己的气泡改到右下，避免遮挡手牌）*/}
         {lastAction && (() => {
           const pos = getPlayerScreenPosition(lastAction.playerId);
           if (!pos) return null;
+          const isMine = lastAction.playerId === playerId;
+          const bubbleColor = lastAction.action === 'allin' ? '#ca8a04' : lastAction.action === 'fold' ? '#dc2626' : lastAction.action === 'raise' ? '#2563eb' : '#16a34a';
+          if (isMine) {
+            // 自己的气泡：放到底部左侧，避开右侧的弹幕按钮和手牌
+            return (
+              <div
+                key={`${lastAction.playerId}-${lastAction.action}-${lastAction.amount}`}
+                className="absolute z-30 action-bubble"
+                style={{
+                  left: '12px',
+                  bottom: '120px',
+                }}
+              >
+                <div className="relative">
+                  <div className={`rounded-lg px-3 py-1.5 text-white text-xs sm:text-sm font-bold shadow-lg whitespace-nowrap ${actionBubbleColor}`}>
+                    {actionBubbleText}
+                  </div>
+                  {/* 右侧小三角指向自己的座位 */}
+                  <div className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-full w-0 h-0"
+                    style={{
+                      borderTop: '5px solid transparent',
+                      borderBottom: '5px solid transparent',
+                      borderLeft: `5px solid ${bubbleColor}`,
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          }
           return (
             <div
               key={`${lastAction.playerId}-${lastAction.action}-${lastAction.amount}`}
@@ -331,7 +360,7 @@ export default function GamePage() {
                 style={{
                   borderLeft: '5px solid transparent',
                   borderRight: '5px solid transparent',
-                  borderTop: `5px solid ${lastAction.action === 'allin' ? '#ca8a04' : lastAction.action === 'fold' ? '#dc2626' : lastAction.action === 'raise' ? '#2563eb' : '#16a34a'}`,
+                  borderTop: `5px solid ${bubbleColor}`,
                 }}
               />
             </div>
@@ -361,27 +390,84 @@ export default function GamePage() {
           );
         })}
 
-        {/* 自己的座位 + 手牌（底部）+ 顺时针流向指示 */}
-        {myCards.length > 0 && (
-          <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center">
-            {/* 行动流向指示器：行动顺序与盲注轮转均为顺时针（BTN → SB → BB） */}
-            <div className="flex items-center gap-1 mb-2 px-2.5 py-1 rounded-full bg-black/45 border border-amber-500/35 backdrop-blur-sm shadow-lg">
-              <span className="text-[9px] font-bold text-white tracking-wide">BTN</span>
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" className="text-amber-400/80">
-                <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span className="text-[9px] font-bold text-blue-400 tracking-wide">SB</span>
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" className="text-amber-400/80">
-                <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span className="text-[9px] font-bold text-red-400 tracking-wide">BB</span>
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" className="text-amber-400 ml-1" aria-label="顺时针">
-                <path d="M21 12a9 9 0 1 1-3.5-7.1" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-                <path d="M21 3v5h-5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+        {/* 自己的座位 + 手牌（底部）+ 本阶段行动顺序提示 */}
+        {myIndex !== -1 && (() => {
+          // 根据当前阶段计算首位行动者位置标识
+          // 翻牌前(preflop)：UTG(dealer+3) 先行动；2人桌 button 先行动
+          // 翻牌后(flop/turn/river)：SB(dealer+1) 先行动；2人桌 button 先行动
+          const n = players.length;
+          let firstOffset: number;
+          if (n === 2) {
+            firstOffset = 0; // heads-up：button 先动（翻牌前 button=SB 也是先动）
+          } else if (gamePhase === 'preflop') {
+            firstOffset = 3; // UTG
+          } else {
+            firstOffset = 1; // SB
+          }
+          const firstSeat = (dealerIndex + firstOffset) % n;
+          const firstLabel = (() => {
+            if (n === 2) return firstOffset === 0 ? 'BTN' : 'BB';
+            if (firstOffset === 0) return 'BTN';
+            if (firstOffset === 1) return 'SB';
+            if (firstOffset === 2) return 'BB';
+            return 'UTG';
+          })();
+          // 构造行动顺序链：首位 → 顺时针 → BB/SB 等
+          const orderLabels: string[] = [];
+          for (let i = 0; i < n; i++) {
+            const seat = (firstSeat + i) % n;
+            const off = (seat - dealerIndex + n) % n;
+            const lbl = (() => {
+              if (n === 2) return off === 0 ? 'BTN' : 'BB';
+              if (off === 0) return 'BTN';
+              if (off === 1) return 'SB';
+              if (off === 2) return 'BB';
+              if (n === 4) return 'UTG';
+              if (n === 5) return off === 3 ? 'UTG' : 'HJ';
+              if (off === n - 1) return 'CO';
+              if (off === n - 2) return 'HJ';
+              if (n >= 8 && off === n - 3) return 'MP';
+              const utgIdx = off - 3;
+              return utgIdx === 0 ? 'UTG' : `UTG+${utgIdx}`;
+            })();
+            orderLabels.push(lbl);
+          }
+          const arrowSvg = (
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" className="text-amber-400/80 shrink-0">
+              <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          );
+          return (
+            <div
+              className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center cursor-pointer"
+              onClick={() => {
+                const me = players[myIndex];
+                if (me) setSelectedPlayer({ ...me });
+              }}
+            >
+              {/* 行动顺序提示：本阶段从谁开始，顺时针轮转 */}
+              <div className="flex items-center gap-1 mb-2 px-2.5 py-1 rounded-full bg-black/45 border border-amber-500/35 backdrop-blur-sm shadow-lg max-w-[90vw] overflow-x-auto">
+                <span className="text-[8px] text-amber-300/80 tracking-wide shrink-0">本手行动顺序</span>
+                {orderLabels.map((lbl, i) => (
+                  <span key={i} className="flex items-center gap-1 shrink-0">
+                    <span className={`text-[9px] font-bold tracking-wide ${
+                      lbl === firstLabel ? 'text-yellow-300' :
+                      lbl === 'BTN' ? 'text-white' :
+                      lbl === 'SB' ? 'text-blue-400' :
+                      lbl === 'BB' ? 'text-red-400' : 'text-gray-300'
+                    }`}>{lbl}</span>
+                    {i < orderLabels.length - 1 && arrowSvg}
+                  </span>
+                ))}
+              </div>
+            <div className="flex gap-1.5 sm:gap-2 min-h-[80px] items-center">
+              {myCards.length > 0
+                ? myCards.map((c, i) => <CardView key={i} card={c} highlight />)
+                : <span className="text-gray-500 text-xs">等待发牌…</span>}
             </div>
-            <div className="flex gap-1.5 sm:gap-2">{myCards.map((c, i) => <CardView key={i} card={c} highlight />)}</div>
-            <div className={`rounded-lg px-3 sm:px-4 py-1.5 text-center backdrop-blur border-2 ${currentPlayerId === playerId ? 'bg-yellow-500/30 border-yellow-400' : 'bg-gray-800/80 border-gray-600'}`}>
+            <div
+              className={`rounded-lg px-3 sm:px-4 py-1.5 text-center backdrop-blur border-2 ${currentPlayerId === playerId ? 'bg-yellow-500/30 border-yellow-400' : 'bg-gray-800/80 border-gray-600'}`}
+            >
               <div className="flex items-center gap-2 justify-center">
                 <span className="text-white text-xs sm:text-sm font-semibold">{players[myIndex]?.nickname || '你'}</span>
                 {(() => {
@@ -418,7 +504,8 @@ export default function GamePage() {
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* 借入弹框：仅在一局结束、下局开始前收到 borrow_request 时显示 */}

@@ -12,7 +12,7 @@ const phaseLabels: Record<string, string> = {
 };
 
 const actionLabels: Record<string, string> = {
-  fold: '弃牌', check: '过牌', call: '跟注', raise: '加注', allin: '全押',
+  fold: '弃牌', check: '过牌', call: '跟注', raise: '加注', allin: '全押', blind: '盲注',
 };
 
 export default function PlayerDetailPanel({ player, gamePlayers, betHistory, onClose }: PlayerDetailPanelProps) {

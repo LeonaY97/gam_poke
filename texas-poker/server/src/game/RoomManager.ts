@@ -21,16 +21,15 @@ export class RoomManager {
       smallBlind: settings.smallBlind || 10,
       bigBlind: settings.bigBlind || 20,
       maxPlayers: settings.maxPlayers || 9,
-      blindInterval: settings.blindInterval || 0,
-      botCount: settings.botCount || 0,
+      botCount: settings.botCount ?? 8,
+      aiDifficulty: settings.aiDifficulty || 'medium',
     };
 
     const player: Player = {
       id: playerId,
       nickname,
       chips: roomSettings.initialChips,
-      seatIndex: 0,
-      isReady: true,
+      isAI: false,
       isConnected: true,
       isHost: true,
       borrowCount: 1,
@@ -49,7 +48,6 @@ export class RoomManager {
 
     this.rooms.set(roomCode, room);
 
-    // 创建房间时立即加入 AI 玩家
     if (roomSettings.botCount > 0) {
       this.addBots(roomCode, roomSettings.botCount);
     }
@@ -58,24 +56,21 @@ export class RoomManager {
   }
 
   joinRoom(roomCode: string, nickname: string): { room: Room; playerId: string } | null {
-    const normalized = roomCode.toUpperCase().trim();
+    const normalized = roomCode.trim();
     const room = this.rooms.get(normalized);
     if (!room) return null;
 
     const playerCount = room.players instanceof Map ? room.players.size : Object.keys(room.players).length;
     if (playerCount >= room.settings.maxPlayers) return null;
-
-    if (room.game && room.game.phase !== 'waiting' && room.game.phase !== 'showdown') {
-      return null;
-    }
+    if (room.game && room.game.phase !== 'waiting') return null;
 
     const playerId = `player_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
     const player: Player = {
       id: playerId,
       nickname,
       chips: room.settings.initialChips,
-      seatIndex: playerCount,
-      isReady: true,
+      isAI: false,
       isConnected: true,
       isHost: false,
       borrowCount: 1,
@@ -95,16 +90,14 @@ export class RoomManager {
     const personas = selectAIPersonas(count);
     const bots: Player[] = [];
 
-    for (let i = 0; i < count; i++) {
-      const playerCount = room.players instanceof Map ? room.players.size : Object.keys(room.players).length;
-      const persona = personas[i];
-      const botId = `bot_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
+    for (const persona of personas) {
+      const botId = `bot_${persona.id}_${Math.random().toString(36).slice(2, 6)}`;
+
       const bot: Player = {
         id: botId,
         nickname: persona.nickname,
         chips: room.settings.initialChips,
-        seatIndex: playerCount,
-        isReady: true,
+        isAI: true,
         isConnected: true,
         isHost: false,
         borrowCount: 1,
@@ -114,6 +107,7 @@ export class RoomManager {
       if (room.players instanceof Map) {
         room.players.set(botId, bot);
       }
+
       bots.push(bot);
     }
 
@@ -128,12 +122,14 @@ export class RoomManager {
       room.players.delete(playerId);
     }
 
-    if (room.hostId === playerId) {
+    if (playerId === room.hostId) {
       if (room.players instanceof Map && room.players.size > 0) {
-        const nextHost = room.players.values().next().value;
-        if (nextHost) {
-          room.hostId = nextHost.id;
-          nextHost.isHost = true;
+        for (const [id, p] of room.players) {
+          if (!p.isAI) {
+            room.hostId = id;
+            p.isHost = true;
+            break;
+          }
         }
       }
     }
@@ -158,7 +154,7 @@ export class RoomManager {
     return this.rooms.get(roomCode) || null;
   }
 
-  getRoomList(): RoomListItem[] {
+  listRooms(): RoomListItem[] {
     const list: RoomListItem[] = [];
     for (const room of this.rooms.values()) {
       const players = room.players instanceof Map
@@ -180,85 +176,51 @@ export class RoomManager {
     return this.gameControllers.get(roomCode) || null;
   }
 
-  createGameController(
-    roomCode: string,
-    broadcastFn: (event: string, data: unknown) => void,
-    privateFn: (playerId: string, event: string, data: unknown) => void
-  ): GameController {
-    const room = this.rooms.get(roomCode);
-    if (!room) throw new Error('Room not found');
-
-    const controller = new GameController(room, broadcastFn, privateFn);
+  setGameController(roomCode: string, controller: GameController): void {
     this.gameControllers.set(roomCode, controller);
-    return controller;
-  }
-
-  removeGameController(roomCode: string): void {
-    this.gameControllers.delete(roomCode);
-  }
-
-  disbandRoom(roomCode: string): boolean {
-    this.gameControllers.delete(roomCode);
-    return this.rooms.delete(roomCode);
-  }
-
-  isHost(roomCode: string, playerId: string): boolean {
-    const room = this.rooms.get(roomCode);
-    return room ? room.hostId === playerId : false;
-  }
-
-  /**
-   * 玩家借入筹码（筹码归零后可再借一手）
-   * 返回更新后的 room，或 null（房间/玩家不存在）
-   */
-  borrowChips(roomCode: string, playerId: string): Room | null {
-    const room = this.rooms.get(roomCode);
-    if (!room) return null;
-
-    if (room.players instanceof Map) {
-      const player = room.players.get(playerId);
-      if (!player) return null;
-      // 只有筹码归零时才能借入
-      if (player.chips > 0) return null;
-      player.chips = room.settings.initialChips;
-      player.borrowCount += 1;
-      return room;
-    }
-    return null;
   }
 
   updatePlayerConnection(roomCode: string, playerId: string, connected: boolean): Room | null {
     const room = this.rooms.get(roomCode);
     if (!room) return null;
 
-    if (room.players instanceof Map) {
-      const player = room.players.get(playerId);
-      if (player) {
-        player.isConnected = connected;
+    const player = room.players instanceof Map
+      ? room.players.get(playerId)
+      : null;
+
+    if (!player) return null;
+
+    player.isConnected = connected;
+    return room;
+  }
+
+  disbandRoom(roomCode: string): void {
+    this.rooms.delete(roomCode);
+    this.gameControllers.delete(roomCode);
+  }
+
+  private cleanupRooms(): void {
+    const now = Date.now();
+    const expireMs = 30 * 60 * 1000;
+
+    for (const [code, room] of this.rooms) {
+      if (now - room.createdAt > expireMs) {
+        const playerCount = room.players instanceof Map ? room.players.size : 0;
+        const hasHuman = room.players instanceof Map
+          ? Array.from(room.players.values()).some(p => !p.isAI)
+          : false;
+
+        if (!hasHuman || playerCount === 0) {
+          this.rooms.delete(code);
+          this.gameControllers.delete(code);
+        }
       }
     }
-
-    return room;
   }
 
   private generateUniqueCode(): string {
     let code: string;
     do { code = generateRoomCode(); } while (this.rooms.has(code));
     return code;
-  }
-
-  private cleanupRooms(): void {
-    const now = Date.now();
-    for (const [code, room] of this.rooms.entries()) {
-      const playerCount = room.players instanceof Map ? room.players.size : Object.keys(room.players).length;
-      const allDisconnected = room.players instanceof Map
-        ? Array.from(room.players.values()).every(p => !p.isConnected)
-        : Object.values(room.players).every(p => !p.isConnected);
-
-      if (playerCount === 0 || (allDisconnected && now - room.createdAt > 30 * 60 * 1000)) {
-        this.rooms.delete(code);
-        this.gameControllers.delete(code);
-      }
-    }
   }
 }

@@ -216,12 +216,8 @@ function getAvailableActions(playerChips, currentBet, highestBet, bigBlind, isFi
     };
 }
 function generateRoomCode() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-        const randomBuffer = new Uint32Array(1);
-        crypto.getRandomValues(randomBuffer);
-        code += chars[randomBuffer[0] % chars.length];
-    }
-    return code;
+    const randomBuffer = new Uint32Array(1);
+    crypto.getRandomValues(randomBuffer);
+    const num = randomBuffer[0] % 10000;
+    return num.toString().padStart(4, '0');
 }

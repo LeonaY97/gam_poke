@@ -14,7 +14,7 @@ export default function JoinRoomModal({ onClose, onJoin }: JoinRoomModalProps) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!nickname.trim() || !roomCode.trim()) return;
-    onJoin(nickname.trim(), roomCode.trim().toUpperCase());
+    onJoin(nickname.trim(), roomCode.trim());
   };
 
   return (
@@ -41,11 +41,12 @@ export default function JoinRoomModal({ onClose, onJoin }: JoinRoomModalProps) {
             <input
               type="text"
               value={roomCode}
-              onChange={e => setRoomCode(e.target.value.toUpperCase().slice(0, 6))}
-              placeholder="输入6位房间号"
+              onChange={e => setRoomCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
+              placeholder="输入4位房间号"
               className="w-full bg-gray-700 text-white rounded-lg px-3 py-2.5 border border-gray-600 focus:border-yellow-500 focus:outline-none text-center text-xl tracking-widest font-mono"
               required
-              maxLength={6}
+              maxLength={4}
+              inputMode="numeric"
             />
           </div>
 

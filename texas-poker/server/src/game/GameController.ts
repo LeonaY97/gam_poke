@@ -96,10 +96,10 @@ export class GameController {
 
   /**
    * 开始一手新牌局：发牌、下盲注、开始下注轮。
-   * startGame（首次开局）和 resetForNewRound（下一手）都调用此方法。
+   * startGame（首次开机）和 resetForNewRound（下一手）都调用此方法。
    * 调用前需已设置 this.game（含 dealerIndex）。
    */
-  private startNewHand(): void {
+  startNewHand(): void {
     // 只有筹码 > 0 的玩家参与这一手
     const allPlayers = this.getPlayersArray().filter(p => p.chips > 0);
 
@@ -187,6 +187,15 @@ export class GameController {
     if (player.chips === 0) {
       gp.isAllIn = true;
     }
+
+    // 盲注也记入 betHistory，让玩家详情面板能看到盲注下注
+    this.game.betHistory.push({
+      playerId: gp.playerId,
+      action: 'blind',
+      amount: actualAmount,
+      phase: this.game.phase,
+      raiseDelta: undefined,
+    });
   }
 
   private startBettingRound(): void {
@@ -505,6 +514,7 @@ export class GameController {
         totalBet: p.totalBet,
         isActive: p.isActive,
       })),
+      betHistory: this.game.betHistory,
     });
 
     console.log(`[行动] ${player.nickname} ${action}${amount > 0 ? ' ' + amount : ''} | 筹码:${player.chips} | 底池:${this.game.pot}`);
@@ -558,8 +568,11 @@ export class GameController {
   }
 
   private hasPlayerActedInRound(playerId: string): boolean {
+    // fold 玩家本轮已"行动过"（弃牌即行动），不应被排除
+    // 但 blind（盲注）是强制下注，不算玩家主动行动，必须排除，
+    // 否则 BB 玩家在 preflop 会被误判为"已行动"，导致本轮提前结束、BB 失去主动行动机会
     return this.game.betHistory.some(
-      b => b.phase === this.game.phase && b.playerId === playerId && b.action !== 'fold'
+      b => b.phase === this.game.phase && b.playerId === playerId && b.action !== 'blind'
     );
   }
 
@@ -945,6 +958,31 @@ export class GameController {
     this.game.dealerIndex = (prevDealer + 1) % playersWithChips.length;
 
     this.startNewHand();
+  }
+
+  /** 房主请求最终清算数据 */
+  getFinalSettlement(): FinalSettlementData {
+    return this.getFinalSettlementData();
+  }
+
+  /** 暂停游戏：停止所有定时器 */
+  pauseGame(): void {
+    if (this.turnTimer) { clearTimeout(this.turnTimer); this.turnTimer = null; }
+    if (this.botTimer) { clearTimeout(this.botTimer); this.botTimer = null; }
+    if (this.showdownTimer) { clearTimeout(this.showdownTimer); this.showdownTimer = null; }
+    this.room.isPaused = true;
+  }
+
+  /** 恢复游戏：从暂停状态恢复，重新触发当前轮次 */
+  resumeGame(): void {
+    this.room.isPaused = false;
+    // 如果游戏进行中，重新给当前玩家发送轮次
+    if (this.game.phase !== 'waiting' && this.game.phase !== 'showdown') {
+      const gp = this.game.players[this.game.currentPlayerIndex];
+      if (gp && !gp.isFolded && !gp.isAllIn) {
+        this.sendTurnToPlayer(gp);
+      }
+    }
   }
 
   /**

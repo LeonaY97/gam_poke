@@ -1,41 +1,18 @@
 import express from 'express';
 import http from 'http';
-import cors from 'cors';
-import compression from 'compression';
 import path from 'path';
 import fs from 'fs';
 import { Server } from 'socket.io';
 import { RoomManager } from './game/RoomManager';
+import { GameController } from './game/GameController';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
-} from '../../shared/types';
+} from '../shared/types';
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-// 开启 gzip 压缩：243KB JS → ~75KB，对走 ngrok 的移动端尤其关键
-app.use(compression());
-
-// 托管前端构建产物，让一个端口同时提供页面和 API
-const clientDist = path.resolve(__dirname, '../../client/dist');
-if (fs.existsSync(clientDist)) {
-  // 带 hash 的 assets 长缓存，index.html 不缓存（保证更新及时）
-  app.use('/assets', express.static(path.join(clientDist, 'assets'), {
-    maxAge: '7d',
-    immutable: true,
-  }));
-  app.use(express.static(clientDist, {
-    maxAge: 0,
-    setHeaders: (res, filePath) => {
-      if (path.basename(filePath) === 'index.html') {
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      }
-    },
-  }));
-}
-
 const server = http.createServer(app);
+
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(server, {
   cors: {
     origin: '*',
@@ -60,11 +37,11 @@ app.get('/health', (_req, res) => {
       }
     }
   }
-  res.json({ status: 'ok', rooms: roomManager.getRoomList().length, lanIps: ips });
+  res.json({ status: 'ok', ips, port: 3001 });
 });
 
 app.get('/api/room/:roomCode', (req, res) => {
-  const room = roomManager.getRoom(req.params.roomCode.toUpperCase());
+  const room = roomManager.getRoom(req.params.roomCode.trim());
   if (!room) {
     return res.status(404).json({ error: '房间不存在' });
   }
@@ -79,6 +56,7 @@ io.on('connection', (socket) => {
     playerRoomMap.set(socket.id, room.id);
     playerIdToSocket.set(playerId, socket.id);
     socket.join(room.id);
+    socket.join(`player:${playerId}`);
 
     const roomData = roomManager.toRoomListItem(room);
 
@@ -103,6 +81,7 @@ io.on('connection', (socket) => {
     playerRoomMap.set(socket.id, room.id);
     playerIdToSocket.set(playerId, socket.id);
     socket.join(room.id);
+    socket.join(`player:${playerId}`);
 
     callback({
       success: true,
@@ -115,7 +94,6 @@ io.on('connection', (socket) => {
     console.log(`[房间] ${data.nickname} 加入了房间 ${room.id}`);
   });
 
-  // 重连：socket 重连后 socket.id 会变，需要重新建立 playerId → socket.id 映射
   socket.on('reconnect_player', (data, callback) => {
     const { playerId, roomCode } = data;
     const room = roomManager.getRoom(roomCode);
@@ -128,12 +106,11 @@ io.on('connection', (socket) => {
       return callback({ success: false, error: '玩家不在房间中' });
     }
 
-    // 重新建立映射
     playerRoomMap.set(socket.id, roomCode);
     playerIdToSocket.set(playerId, socket.id);
     socket.join(roomCode);
+    socket.join(`player:${playerId}`);
 
-    // 恢复连接状态
     const updatedRoom = roomManager.updatePlayerConnection(roomCode, playerId, true);
     if (updatedRoom) {
       const roomData = roomManager.toRoomListItem(updatedRoom);
@@ -142,15 +119,6 @@ io.on('connection', (socket) => {
     }
 
     callback({ success: true, room: roomManager.toRoomListItem(room) });
-
-    // 如果游戏进行中，重发该玩家的游戏状态（手牌、社区牌、当前轮次等）
-    const controller = roomManager.getGameController(roomCode);
-    if (controller) {
-      controller.handlePlayerReconnect(playerId);
-      controller.resendStateForPlayer(playerId);
-    }
-
-    console.log(`[重连] ${player.nickname} (${playerId}) 重新连接到房间 ${roomCode}`);
   });
 
   socket.on('start_game', (data) => {
@@ -158,174 +126,32 @@ io.on('connection', (socket) => {
     const room = roomManager.getRoom(roomCode);
     if (!room) return;
 
-    const hostPlayerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-
-    if (room.hostId !== hostPlayerId) {
-      socket.emit('error', { message: '只有房主可以开始游戏' });
-      return;
-    }
-
-    // 房间人数未满不允许开始游戏
-    const playerCount = room.players instanceof Map ? room.players.size : Object.keys(room.players).length;
-    if (playerCount < room.settings.maxPlayers) {
-      socket.emit('error', { message: `房间未满（${playerCount}/${room.settings.maxPlayers}），无法开始游戏` });
-      return;
-    }
-
-    let controller = roomManager.getGameController(roomCode);
-    if (!controller) {
-      controller = roomManager.createGameController(
-        roomCode,
-        (event, eventData) => {
-          io.to(roomCode).emit(event as never, eventData as never);
-        },
-        (playerId, event, eventData) => {
-          const sid = playerIdToSocket.get(playerId);
-          if (sid) {
-            io.to(sid).emit(event as never, eventData as never);
-          }
-        }
-      );
-    }
-
-    controller.startGame();
-
-    const updatedRoom = roomManager.toRoomListItem(room);
-    io.to(roomCode).emit('room_updated', { room: updatedRoom });
-    console.log(`[游戏] 房间 ${roomCode} 游戏开始`);
-  });
-
-  // 借入筹码决策：玩家选择借入或旁观
-  socket.on('borrow_chips', (data, callback) => {
-    const roomCode = data.roomCode;
     const playerId = Array.from(playerIdToSocket.entries())
       .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || playerId !== room.hostId) return;
 
-    if (!playerId) {
-      return callback({ success: false, error: '找不到玩家信息' });
-    }
-
-    const controller = roomManager.getGameController(roomCode);
-    if (!controller) {
-      return callback({ success: false, error: '游戏未在进行中' });
-    }
-
-    // borrow=true 借入, borrow=false 旁观
-    const borrow = data.borrow !== false;
-    controller.resolveBorrower(playerId, borrow);
-
-    callback({ success: true });
-    console.log(`[借入] 玩家 ${playerId} ${borrow ? '借入筹码' : '选择旁观'}`);
-  });
-
-  // 玩家关闭结算画面
-  socket.on('ack_hand_result', () => {
-    const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
-    const controller = roomManager.getGameController(roomCode);
-    if (!controller) return;
-    const playerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-    if (playerId) controller.ackHandResult(playerId);
-  });
-
-  // 房主请求最终清算
-  socket.on('request_final_settlement', () => {
-    const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
-    const room = roomManager.getRoom(roomCode);
-    if (!room) return;
-    const playerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId || room.hostId !== playerId) {
-      socket.emit('error', { message: '只有房主可以发起最终清算' });
-      return;
-    }
-    const controller = roomManager.getGameController(roomCode);
-    if (!controller) {
-      socket.emit('error', { message: '游戏未在进行中' });
-      return;
-    }
-    const data = controller.getFinalSettlementData();
-    io.to(roomCode).emit('final_settlement', data);
-    console.log(`[清算] 房间 ${roomCode} 房主发起最终清算`);
-  });
-
-  // 房主重新开始（沿用相同配置）
-  socket.on('restart_game', () => {
-    const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
-    const room = roomManager.getRoom(roomCode);
-    if (!room) return;
-    const playerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId || room.hostId !== playerId) {
-      socket.emit('error', { message: '只有房主可以重新开始' });
-      return;
-    }
-    const controller = roomManager.getGameController(roomCode);
-    if (!controller) {
-      socket.emit('error', { message: '游戏未在进行中' });
-      return;
-    }
-    controller.restartGame();
-    const updatedRoom = roomManager.toRoomListItem(room);
-    io.to(roomCode).emit('room_updated', { room: updatedRoom });
-    console.log(`[重开] 房间 ${roomCode} 房主重新开始游戏`);
-  });
-
-  // 房主继续牌局（保持积分和借入手数，直接开新局）
-  socket.on('continue_game', () => {
-    const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
-    const room = roomManager.getRoom(roomCode);
-    if (!room) return;
-    const playerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId || room.hostId !== playerId) {
-      socket.emit('error', { message: '只有房主可以继续牌局' });
-      return;
-    }
-    const controller = roomManager.getGameController(roomCode);
-    if (!controller) {
-      socket.emit('error', { message: '游戏未在进行中' });
-      return;
-    }
     try {
-      controller.continueGame();
-      const updatedRoom = roomManager.toRoomListItem(room);
-      io.to(roomCode).emit('room_updated', { room: updatedRoom });
-      console.log(`[继续] 房间 ${roomCode} 房主继续牌局（保留积分）`);
+      const controller = new GameController(
+        room,
+        (event, payload) => {
+          io.to(roomCode).emit(event, payload);
+        },
+        (playerId, event, payload) => {
+          io.to(`player:${playerId}`).emit(event, payload);
+        },
+      );
+      roomManager.setGameController(roomCode, controller);
+      controller.startGame();
+
+      // startGame 重排了 room.players（真人在前、机器人在后），
+      // 必须广播 room_updated 让前端拿到重排后的顺序，否则
+      // dealerIndex（相对 game.players）与前端 seatIndex（相对 room.players）错位，
+      // 导致位置标记(BTN/SB/BB)标错座位、行动顺序看起来跳跃。
+      io.to(roomCode).emit('room_updated', { room: roomManager.toRoomListItem(room) });
+      console.log(`[游戏] 房间 ${roomCode} 游戏开始`);
     } catch (e: any) {
-      socket.emit('error', { message: e?.message || '无法继续牌局' });
+      socket.emit('error', { message: e?.message || '无法开始游戏' });
     }
-  });
-
-  // 玩家发送弹幕
-  socket.on('send_danmaku', (data: { text: string; color?: string }) => {
-    const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
-    const playerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId) return;
-    const room = roomManager.getRoom(roomCode);
-    if (!room) return;
-    const player = room.players instanceof Map ? room.players.get(playerId) : null;
-    if (!player) return;
-
-    const text = (data.text || '').trim().slice(0, 50); // 最多50字
-    if (!text) return;
-
-    const colors = ['#fbbf24', '#f87171', '#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#f472b6'];
-    const color = data.color || colors[Math.floor(Math.random() * colors.length)];
-
-    io.to(roomCode).emit('danmaku_received', {
-      playerId,
-      nickname: player.nickname,
-      text,
-      color,
-    });
   });
 
   socket.on('player_action', (data, callback) => {
@@ -350,6 +176,215 @@ io.on('connection', (socket) => {
     callback(result);
   });
 
+  socket.on('borrow_chips', (data, callback) => {
+    const roomCode = data.roomCode;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return callback({ success: false, error: '房间不存在' });
+
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId) return callback({ success: false, error: '找不到玩家信息' });
+
+    const player = room.players instanceof Map ? room.players.get(playerId) : null;
+    if (!player) return callback({ success: false, error: '玩家不在房间中' });
+
+    if (player.borrowCount <= 0) {
+      return callback({ success: false, error: '借入次数已用完' });
+    }
+
+    const initialChips = room.settings.initialChips;
+    player.chips += initialChips;
+    player.borrowCount--;
+
+    const roomData = roomManager.toRoomListItem(room);
+    io.to(roomCode).emit('room_updated', { room: roomData });
+
+    callback({ success: true });
+    console.log(`[借入] ${player.nickname} 借入 ${initialChips} 筹码，剩余 ${player.borrowCount} 次`);
+  });
+
+  socket.on('resolve_borrow', (data, callback) => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return callback({ success: false, error: '你不在任何房间中' });
+
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId) return callback({ success: false, error: '找不到玩家信息' });
+
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return callback({ success: false, error: '游戏未开始' });
+
+    const borrow = data.borrow !== false;
+    controller.resolveBorrower(playerId, borrow);
+
+    callback({ success: true });
+    console.log(`[借入] 玩家 ${playerId} ${borrow ? '借入筹码' : '选择旁观'}`);
+  });
+
+  socket.on('next_hand', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId) return;
+
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+
+    controller.startNewHand();
+    console.log(`[游戏] 房间 ${roomCode} 开始新一局`);
+  });
+
+  socket.on('pause_game', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || playerId !== room.hostId) return;
+
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+
+    controller.pauseGame();
+    const roomData = roomManager.toRoomListItem(room);
+    io.to(roomCode).emit('room_updated', { room: roomData });
+    console.log(`[游戏] 房间 ${roomCode} 游戏暂停`);
+  });
+
+  socket.on('resume_game', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || playerId !== room.hostId) return;
+
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+
+    controller.resumeGame();
+    const roomData = roomManager.toRoomListItem(room);
+    io.to(roomCode).emit('room_updated', { room: roomData });
+    console.log(`[游戏] 房间 ${roomCode} 游戏恢复`);
+  });
+
+  socket.on('next_hand', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId) return;
+
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+
+    try {
+      controller.startNewHand();
+    } catch (e: any) {
+      socket.emit('error', { message: e?.message || '无法继续牌局' });
+    }
+  });
+
+  // 玩家确认关闭结算画面 → 推进下一手
+  socket.on('ack_hand_result', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId) return;
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+    controller.ackHandResult(playerId);
+  });
+
+  // 房主请求最终清算数据
+  socket.on('request_final_settlement', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || playerId !== room.hostId) return;
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+    const data = controller.getFinalSettlement();
+    io.to(roomCode).emit('final_settlement', data);
+    console.log(`[清算] 房间 ${roomCode} 最终清算已发送`);
+  });
+
+  // 房主继续牌局（保留积分和借入手数）
+  socket.on('continue_game', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || playerId !== room.hostId) return;
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+    try {
+      controller.continueGame();
+      const roomData = roomManager.toRoomListItem(room);
+      io.to(roomCode).emit('room_updated', { room: roomData });
+      console.log(`[游戏] 房间 ${roomCode} 继续牌局（保留积分）`);
+    } catch (e: any) {
+      socket.emit('error', { message: e?.message || '无法继续牌局' });
+    }
+  });
+
+  // 房主重新开始（重置筹码和借入手数）
+  socket.on('restart_game', () => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId || playerId !== room.hostId) return;
+    const controller = roomManager.getGameController(roomCode);
+    if (!controller) return;
+    controller.restartGame();
+    const roomData = roomManager.toRoomListItem(room);
+    io.to(roomCode).emit('room_updated', { room: roomData });
+    console.log(`[游戏] 房间 ${roomCode} 重新开始`);
+  });
+
+  socket.on('send_danmaku', (data: { text: string; color?: string }) => {
+    const roomCode = playerRoomMap.get(socket.id);
+    if (!roomCode) return;
+    const playerId = Array.from(playerIdToSocket.entries())
+      .find(([, sid]) => sid === socket.id)?.[0];
+    if (!playerId) return;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
+    const player = room.players instanceof Map ? room.players.get(playerId) : null;
+    if (!player) return;
+
+    const text = (data.text || '').trim().slice(0, 50);
+    if (!text) return;
+
+    const colors = ['#fbbf24', '#f87171', '#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#f472b6'];
+    const color = data.color || colors[Math.floor(Math.random() * colors.length)];
+
+    io.to(roomCode).emit('danmaku_received', {
+      playerId,
+      nickname: player.nickname,
+      text,
+      color,
+    });
+  });
+
   socket.on('leave_room', () => {
     const roomCode = playerRoomMap.get(socket.id);
     if (!roomCode) return;
@@ -369,38 +404,27 @@ io.on('connection', (socket) => {
     if (room) {
       const roomData = roomManager.toRoomListItem(room);
       io.to(roomCode).emit('room_updated', { room: roomData });
+    } else {
+      io.to(roomCode).emit('room_disbanded');
     }
-    console.log(`[房间] ${socket.id} 离开了房间 ${roomCode}`);
+
+    console.log(`[房间] 玩家离开房间 ${roomCode}`);
   });
 
-  socket.on('kick_player', (data) => {
+  socket.on('disband_room', async () => {
     const roomCode = playerRoomMap.get(socket.id);
     if (!roomCode) return;
 
-    if (!roomManager.isHost(roomCode, socket.id)) return;
-
-    const room = roomManager.leaveRoom(roomCode, data.playerId);
-    if (room) {
-      const roomData = roomManager.toRoomListItem(room);
-      io.to(roomCode).emit('room_updated', { room: roomData });
-    }
-  });
-
-  socket.on('disband_room', () => {
-    const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
+    const room = roomManager.getRoom(roomCode);
+    if (!room) return;
 
     const playerId = Array.from(playerIdToSocket.entries())
       .find(([, sid]) => sid === socket.id)?.[0];
-
-    if (!playerId || !roomManager.isHost(roomCode, playerId)) return;
-
-    const controller = roomManager.getGameController(roomCode);
-    if (controller) controller.destroy();
+    if (!playerId || playerId !== room.hostId) return;
 
     io.to(roomCode).emit('room_disbanded');
 
-    const sockets = io.sockets.adapter.rooms.get(roomCode);
+    const sockets = await io.in(roomCode).fetchSockets();
     if (sockets) {
       for (const sid of sockets) {
         playerRoomMap.delete(sid);
@@ -441,23 +465,21 @@ io.on('connection', (socket) => {
     }
 
     playerRoomMap.delete(socket.id);
-    if (playerId) playerIdToSocket.delete(playerId);
     console.log(`[断开] ${socket.id}`);
   });
 });
 
-// SPA 回退：非 API/socket.io 路由都返回 index.html
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/socket.io') || req.path.startsWith('/health')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  const indexPath = path.join(clientDist, 'index.html');
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res.status(404).send('前端未构建，请先运行 cd client && npm run build');
-  }
-});
+// ===== 前端静态文件服务 =====
+// 后端同时托管前端构建产物（client/dist），手机通过 ngrok 公网访问时
+// 直接由 3001 端口返回页面，无需单独跑前端 dev server。
+const clientDist = path.resolve(__dirname, '../../client/dist');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  // SPA 回退：所有非 API、非 socket.io 的 GET 请求都返回 index.html
+  app.get(/^\/(?!api|socket\.io|health).*/, (_req, res) => {
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+}
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {

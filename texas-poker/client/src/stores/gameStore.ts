@@ -4,6 +4,13 @@ import type {
   PlayerAction, HandResult, RoomSettings, FinalSettlementData,
 } from '../types/game';
 
+export interface DanmakuItem {
+  id: number;
+  nickname: string;
+  text: string;
+  color: string;
+}
+
 interface GameState {
   connected: boolean;
   playerId: string | null;
@@ -22,6 +29,7 @@ interface GameState {
   serverUrl: string;
   borrowRequest: { borrowCount: number; initialChips: number } | null;
   finalSettlement: FinalSettlementData | null;
+  danmakus: DanmakuItem[];
 
   setConnected: (v: boolean) => void;
   setPlayerId: (id: string | null) => void;
@@ -40,8 +48,12 @@ interface GameState {
   setServerUrl: (url: string) => void;
   setBorrowRequest: (req: { borrowCount: number; initialChips: number } | null) => void;
   setFinalSettlement: (data: FinalSettlementData | null) => void;
+  addDanmaku: (danmaku: { nickname: string; text: string; color: string }) => void;
+  removeDanmaku: (id: number) => void;
   reset: () => void;
 }
+
+let danmakuIdCounter = 0;
 
 export const useGameStore = create<GameState>((set) => ({
   connected: false,
@@ -61,6 +73,7 @@ export const useGameStore = create<GameState>((set) => ({
   serverUrl: localStorage.getItem('poker_server_url') || 'http://localhost:3001',
   borrowRequest: null,
   finalSettlement: null,
+  danmakus: [],
 
   setConnected: (v) => set({ connected: v }),
   setPlayerId: (id) => {
@@ -93,6 +106,16 @@ export const useGameStore = create<GameState>((set) => ({
   },
   setBorrowRequest: (req) => set({ borrowRequest: req }),
   setFinalSettlement: (data) => set({ finalSettlement: data }),
+  addDanmaku: (danmaku) => {
+    const id = ++danmakuIdCounter;
+    const item: DanmakuItem = { id, ...danmaku };
+    set((state) => ({ danmakus: [...state.danmakus.slice(-8), item] }));
+    // 6秒后移除
+    setTimeout(() => {
+      useGameStore.getState().removeDanmaku(id);
+    }, 6000);
+  },
+  removeDanmaku: (id) => set((state) => ({ danmakus: state.danmakus.filter(d => d.id !== id) })),
   reset: () => {
     localStorage.removeItem('poker_player_id');
     localStorage.removeItem('poker_room_code');
@@ -112,6 +135,7 @@ export const useGameStore = create<GameState>((set) => ({
       handResult: null,
       borrowRequest: null,
       finalSettlement: null,
+      danmakus: [],
     });
   },
 }));

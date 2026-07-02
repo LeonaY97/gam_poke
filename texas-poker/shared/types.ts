@@ -49,7 +49,8 @@ export interface SidePot {
 
 export interface BetRecord {
   playerId: string;
-  action: PlayerAction;
+  /** 行动类型；'blind' 用于盲注（非玩家主动行动，但需在记录中展示） */
+  action: PlayerAction | 'blind';
   amount: number;
   phase: GamePhase;
   /** 仅 raise 记录填充：本次加注的增量（= 新最高下注 - 旧最高下注），用于计算后续最小加注 */

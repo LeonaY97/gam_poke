@@ -80,7 +80,7 @@ export function useSocket() {
       }
     });
 
-    socket.on('game_started', () => {
+    socket.on('game_started', (data: { seats?: any[]; dealerPos?: number; currentPlayerId?: string }) => {
       const st = useGameStore.getState();
       st.setInGame(true);
       st.setGamePhase('preflop');
@@ -92,6 +92,34 @@ export function useSocket() {
       st.setCurrentPlayerId(null);
       st.setBorrowRequest(null);
       st.setFinalSettlement(null);
+      // 重置 room.game 为新一局，清空上一手的 betHistory / players 等
+      const r = st.room;
+      if (r) {
+        st.setRoom({
+          ...r,
+          game: {
+            id: `game_${Date.now()}`,
+            round: 1,
+            phase: 'preflop',
+            deck: [],
+            communityCards: [],
+            pot: 0,
+            sidePots: [],
+            dealerIndex: data.dealerPos ?? 0,
+            currentPlayerIndex: 0,
+            players: (data.seats || []).map((p: any) => ({
+              playerId: p.id,
+              hand: [],
+              currentBet: 0,
+              totalBet: 0,
+              isFolded: false,
+              isAllIn: false,
+              isActive: true,
+            })),
+            betHistory: [],
+          } as any,
+        });
+      }
     });
 
     socket.on('borrow_request', (data: { playerId: string; borrowCount: number; initialChips: number }) => {
@@ -144,7 +172,7 @@ export function useSocket() {
       }
     });
 
-    socket.on('action_result', (data: { playerId: string; playerName: string; action: string; amount: number; chips: number; pot: number; currentBet: number; isFolded: boolean; isAllIn: boolean; gamePlayers?: any[] }) => {
+    socket.on('action_result', (data: { playerId: string; playerName: string; action: string; amount: number; chips: number; pot: number; currentBet: number; isFolded: boolean; isAllIn: boolean; gamePlayers?: any[]; betHistory?: any[] }) => {
       const st = useGameStore.getState();
       st.setLastAction({ playerId: data.playerId, playerName: data.playerName, action: data.action as any, amount: data.amount });
       st.setPot(data.pot);
@@ -165,6 +193,7 @@ export function useSocket() {
           ...r.game,
           pot: data.pot,
           players: data.gamePlayers || r.game.players,
+          betHistory: data.betHistory || r.game.betHistory,
         } : r.game;
         st.setRoom({ ...r, players: updatedPlayers, game: updatedGame });
       }
@@ -212,6 +241,14 @@ export function useSocket() {
 
     socket.on('final_settlement', (data: FinalSettlementData) => {
       useGameStore.getState().setFinalSettlement(data);
+    });
+
+    socket.on('danmaku_received', (data: { playerId: string; nickname: string; text: string; color: string }) => {
+      useGameStore.getState().addDanmaku({
+        nickname: data.nickname,
+        text: data.text,
+        color: data.color,
+      });
     });
 
     socket.on('error', (data: { message: string }) => {
