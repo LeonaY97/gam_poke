@@ -233,6 +233,22 @@ export function useSocket() {
       if (st.room) {
         st.setRoom({ ...st.room, players: st.room.players.map(p => p.id === data.playerId ? { ...p, isConnected: true } : p) });
       }
+      // 重连玩家：清除离线倒计时
+      if (st.offlineCountdown?.playerId === data.playerId) {
+        st.setOfflineCountdown(null);
+      }
+    });
+
+    socket.on('offline_countdown', (data: { playerId: string; seconds: number }) => {
+      const st = useGameStore.getState();
+      st.setOfflineCountdown({ playerId: data.playerId, seconds: data.seconds });
+      // 倒计时结束后自动清除
+      setTimeout(() => {
+        const cur = useGameStore.getState().offlineCountdown;
+        if (cur?.playerId === data.playerId) {
+          useGameStore.getState().setOfflineCountdown(null);
+        }
+      }, data.seconds * 1000);
     });
 
     socket.on('room_disbanded', () => {

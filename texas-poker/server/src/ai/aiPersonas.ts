@@ -293,6 +293,11 @@ export function selectAIPersonas(count: number): AIPersona[] {
 /**
  * 根据人设风格调整 bot 的手牌强度评估和行动倾向。
  * 返回调整后的"有效手牌强度"，用于 AI 决策。
+ *
+ * 设计原则：保持 baseStrength 不被系统性抬高，否则 AI 永远不会 fold。
+ * - 松型人设略上调弱牌（更愿入池），但不下调 fold 阈值；
+ * - 紧型人设略下调弱牌（更易弃牌）；
+ * - 强牌区间几乎不动，避免改变牌型评估的客观性。
  */
 export function adjustHandStrengthByPersona(
   baseStrength: number,
@@ -301,23 +306,31 @@ export function adjustHandStrengthByPersona(
 ): number {
   switch (persona.style) {
     case 'loose-aggressive':
+      // 弱牌略高看一眼（愿意入池），强牌不动
+      return baseStrength < 0.5 ? Math.min(0.5, baseStrength + 0.08) : baseStrength;
     case 'tricky':
-      return Math.min(1, baseStrength + 0.1);
+      // 全段微调，便于变节奏
+      return Math.min(1, baseStrength + 0.05);
     case 'loose-passive':
     case 'calling-station':
-      return Math.min(1, baseStrength + 0.05);
+      // 什么牌都想看，弱牌略上调
+      return baseStrength < 0.4 ? Math.min(0.4, baseStrength + 0.05) : baseStrength;
     case 'maniac':
-      return Math.min(1, baseStrength + 0.2);
+      // 弱牌也敢打，但不上调到中段（保留 fold 空间）
+      return baseStrength < 0.4 ? Math.min(0.45, baseStrength + 0.1) : baseStrength;
     case 'tight-passive':
+      // 紧：弱牌更弱，强牌不动
+      return baseStrength < 0.5 ? Math.max(0, baseStrength - 0.12) : baseStrength;
     case 'rock':
-      return Math.max(0, baseStrength - 0.1);
+      // 极紧：弱牌大幅下调
+      return baseStrength < 0.6 ? Math.max(0, baseStrength - 0.18) : baseStrength;
     case 'bomber':
       // 炸弹型：弱牌更紧，强牌更凶
-      if (baseStrength > 0.6) return Math.min(1, baseStrength + 0.15);
-      return Math.max(0, baseStrength - 0.1);
+      if (baseStrength > 0.6) return Math.min(1, baseStrength + 0.1);
+      return Math.max(0, baseStrength - 0.08);
     case 'short-stack':
-      // 短码型：中强牌更激进
-      if (baseStrength > 0.4) return Math.min(1, baseStrength + 0.1);
+      // 短码型：中段略上调（推 all-in 的范围更宽）
+      if (baseStrength > 0.4 && baseStrength < 0.7) return Math.min(0.7, baseStrength + 0.08);
       return baseStrength;
     default:
       return baseStrength;
@@ -327,6 +340,9 @@ export function adjustHandStrengthByPersona(
 /**
  * 根据人设获取风格化的行动倾向系数。
  * 返回 { raiseBias, callBias, foldBias, bluffBias }，均为乘数。
+ *
+ * 设计原则：foldBias 最低也不低于 0.5（即便是 maniac/calling-station，
+ * 面对足够大的下注也必须能 fold），否则会出现"AI 永不弃牌"的问题。
  */
 export function getPersonaActionBias(persona: AIPersona): {
   raiseBias: number;
@@ -336,23 +352,23 @@ export function getPersonaActionBias(persona: AIPersona): {
 } {
   switch (persona.style) {
     case 'tight-aggressive':
-      return { raiseBias: 1.2, callBias: 0.9, foldBias: 1.1, bluffBias: 1.1 };
+      return { raiseBias: 1.3, callBias: 0.85, foldBias: 1.3, bluffBias: 1.1 };
     case 'loose-aggressive':
-      return { raiseBias: 1.5, callBias: 1.1, foldBias: 0.6, bluffBias: 1.8 };
+      return { raiseBias: 1.5, callBias: 1.15, foldBias: 0.75, bluffBias: 1.8 };
     case 'tight-passive':
-      return { raiseBias: 0.5, callBias: 1.1, foldBias: 1.2, bluffBias: 0.3 };
+      return { raiseBias: 0.5, callBias: 1.0, foldBias: 1.4, bluffBias: 0.3 };
     case 'loose-passive':
-      return { raiseBias: 0.4, callBias: 1.4, foldBias: 0.5, bluffBias: 0.2 };
+      return { raiseBias: 0.4, callBias: 1.4, foldBias: 0.7, bluffBias: 0.2 };
     case 'maniac':
-      return { raiseBias: 2.0, callBias: 1.2, foldBias: 0.3, bluffBias: 2.5 };
+      return { raiseBias: 2.0, callBias: 1.2, foldBias: 0.55, bluffBias: 2.5 };
     case 'rock':
-      return { raiseBias: 0.7, callBias: 1.0, foldBias: 1.4, bluffBias: 0.1 };
+      return { raiseBias: 0.7, callBias: 0.9, foldBias: 1.6, bluffBias: 0.1 };
     case 'calling-station':
-      return { raiseBias: 0.2, callBias: 1.8, foldBias: 0.2, bluffBias: 0.1 };
+      return { raiseBias: 0.2, callBias: 1.8, foldBias: 0.5, bluffBias: 0.1 };
     case 'bomber':
-      return { raiseBias: 1.3, callBias: 0.8, foldBias: 1.1, bluffBias: 0.5 };
+      return { raiseBias: 1.3, callBias: 0.8, foldBias: 1.2, bluffBias: 0.5 };
     case 'tricky':
-      return { raiseBias: 1.4, callBias: 1.0, foldBias: 0.8, bluffBias: 2.0 };
+      return { raiseBias: 1.4, callBias: 1.0, foldBias: 0.9, bluffBias: 2.0 };
     case 'short-stack':
       return { raiseBias: 1.6, callBias: 0.9, foldBias: 1.0, bluffBias: 1.2 };
     default:

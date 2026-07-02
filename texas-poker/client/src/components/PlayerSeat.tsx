@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { Player } from '../types/game';
 
 interface PlayerSeatProps {
@@ -14,6 +15,8 @@ interface PlayerSeatProps {
   currentBet?: number;
   /** 该玩家是否已弃牌 */
   isFolded?: boolean;
+  /** 离线倒计时总秒数（仅在该玩家处于离线等待时传入） */
+  offlineCountdownSeconds?: number | null;
   position: { x: number; y: number };
 }
 
@@ -26,21 +29,46 @@ export default function PlayerSeat({
   isThinking = false,
   currentBet = 0,
   isFolded = false,
+  offlineCountdownSeconds = null,
   position,
 }: PlayerSeatProps) {
-  // 弃牌玩家：明显置灰
+  // 本地倒计时：从总秒数开始每秒递减，到 0 清除
+  const [countdown, setCountdown] = useState<number | null>(null);
+  useEffect(() => {
+    if (offlineCountdownSeconds && offlineCountdownSeconds > 0) {
+      setCountdown(offlineCountdownSeconds);
+      const start = Date.now();
+      const total = offlineCountdownSeconds * 1000;
+      const timer = setInterval(() => {
+        const elapsed = Date.now() - start;
+        const remain = Math.max(0, Math.ceil((total - elapsed) / 1000));
+        setCountdown(remain);
+        if (remain <= 0) clearInterval(timer);
+      }, 250);
+      return () => clearInterval(timer);
+    } else {
+      setCountdown(null);
+    }
+  }, [offlineCountdownSeconds]);
+
+  const isOfflineWaiting = countdown !== null && countdown > 0;
+
+  // 弃牌玩家：明显置灰；离线等待倒计时：橙色边框高亮提示
   const bgColor = isFolded
     ? 'bg-gray-900/60 border-gray-700 opacity-45'
-    : player.isConnected
-      ? isActiveTurn || isThinking
-        ? 'bg-yellow-500/30 border-yellow-400 shadow-lg shadow-yellow-500/30 turn-glow'
-        : isCurrentPlayer
-          ? 'bg-green-500/20 border-green-400'
-          : 'bg-gray-800/80 border-gray-600'
-      : 'bg-gray-700/50 border-gray-500 opacity-60';
+    : isOfflineWaiting
+      ? 'bg-orange-600/40 border-orange-400 shadow-lg shadow-orange-500/40 turn-glow'
+      : player.isConnected
+        ? isActiveTurn || isThinking
+          ? 'bg-yellow-500/30 border-yellow-400 shadow-lg shadow-yellow-500/30 turn-glow'
+          : isCurrentPlayer
+            ? 'bg-green-500/20 border-green-400'
+            : 'bg-gray-800/80 border-gray-600'
+        : 'bg-gray-700/50 border-gray-500 opacity-60';
 
   const statusBadge = (() => {
     if (isFolded) return { text: '已弃牌', color: 'bg-gray-600' };
+    if (isOfflineWaiting) return { text: `离线 ${countdown}s`, color: 'bg-orange-500 animate-pulse' };
     if (!player.isConnected) return { text: '离线', color: 'bg-gray-500' };
     if (isThinking) return { text: '思考中', color: 'bg-blue-500' };
     if (isActiveTurn) return { text: '行动中', color: 'bg-yellow-500 animate-pulse' };

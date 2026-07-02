@@ -116,6 +116,12 @@ io.on('connection', (socket) => {
       const roomData = roomManager.toRoomListItem(updatedRoom);
       io.to(roomCode).emit('room_updated', { room: roomData });
       io.to(roomCode).emit('player_reconnected', { playerId, nickname: player.nickname });
+
+      // 通知 GameController 玩家已重连：若该玩家正处离线倒计时，清除并重新下发回合
+      const controller = roomManager.getGameController(roomCode);
+      if (controller) {
+        controller.handlePlayerReconnect(playerId);
+      }
     }
 
     callback({ success: true, room: roomManager.toRoomListItem(room) });

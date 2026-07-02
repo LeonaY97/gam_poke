@@ -251,6 +251,16 @@ export class GameController {
       return;
     }
 
+    // 离线玩家：10 秒倒计时后 AI 接管（能过牌就过牌，不能过牌就弃牌）
+    if (!player.isConnected) {
+      this.broadcastFn('offline_countdown', { playerId: gp.playerId, seconds: 10 });
+      if (this.turnTimer) clearTimeout(this.turnTimer);
+      this.turnTimer = setTimeout(() => {
+        this.autoActForOfflinePlayer(gp);
+      }, 10000);
+      return;
+    }
+
     const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
     const lastRaiseAmount = this.getLastRaiseAmount();
     const isFirstToAct = this.isFirstToActInRound();
@@ -273,36 +283,44 @@ export class GameController {
     if (this.turnTimer) clearTimeout(this.turnTimer);
     this.turnTimer = setTimeout(() => {
       // 超时自动操作：能过牌就过牌，不能过牌就弃牌
-      const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
-      const toCall = highestBet - gp.totalBet;
-      if (toCall <= 0) {
-        this.handleAction(gp.playerId, 'check', 0);
-      } else {
-        this.handleAction(gp.playerId, 'fold', 0);
-      }
+      this.autoActForOfflinePlayer(gp);
     }, options.timeout * 1000);
   }
 
   private scheduleBotAction(gp: GamePlayer): void {
     // 每个 AI 至少 2s（2.0s ~ 3.0s），确保玩家能看清操作气泡
     const delay = 2000 + Math.random() * 1000;
+    // 记录本次调度的 currentPlayerId，用于判断 timer 触发后是否已被其他流程推进
+    const expectedPlayerId = gp.playerId;
 
     if (this.botTimer) clearTimeout(this.botTimer);
     this.botTimer = setTimeout(() => {
+      // 防御：timer 触发前 currentPlayer 可能已被其他流程推进（如离线超时、手动操作）
+      const currentGp = this.game.players[this.game.currentPlayerIndex];
+      if (currentGp?.playerId !== expectedPlayerId) {
+        console.log(`[AI] ${gp.playerId} 的 timer 触发时 currentPlayer 已变为 ${currentGp?.playerId}，跳过`);
+        return;
+      }
       this.executeBotAction(gp);
     }, delay);
   }
 
   private executeBotAction(gp: GamePlayer): void {
     const player = this.getPlayer(gp.playerId);
-    if (!player || gp.isFolded || gp.isAllIn) return;
+    // 防御：player 不存在或已弃牌/all-in，不应轮到此玩家，但必须推进游戏避免卡死
+    if (!player || gp.isFolded || gp.isAllIn) {
+      console.warn(`[AI] executeBotAction 被调用但 gp 状态异常: player=${!!player}, folded=${gp.isFolded}, allIn=${gp.isAllIn}`);
+      this.checkBettingRoundEnd();
+      return;
+    }
 
     const persona = AI_PERSONA_POOL.find(p => p.id === player.aiPersonaId) || null;
 
     const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
     const toCall = highestBet - gp.totalBet;
     const lastRaise = this.getLastRaiseAmount();
-    const minRaiseTotal = toCall <= 0 ? 1 : highestBet + (lastRaise > 0 ? lastRaise : this.room.settings.bigBlind);
+    const bigBlind = this.room.settings.bigBlind;
+    const minRaiseTotal = toCall <= 0 ? bigBlind * 2 : highestBet + (lastRaise > 0 ? lastRaise : bigBlind);
 
     let handStrength = this.evaluateBotHandStrength(gp);
 
@@ -316,67 +334,140 @@ export class GameController {
     }
 
     const bias = persona ? getPersonaActionBias(persona) : null;
-    const random = Math.random();
+    const rnd = Math.random();
+
+    // 跟注金额占剩余筹码的比例：判断是否"贵到该弃牌"
+    const callCostRatio = player.chips > 0 ? toCall / player.chips : 1;
 
     let action: PlayerAction;
     let amount = 0;
 
     if (toCall <= 0) {
-      const raiseChance = bias ? 0.4 * bias.raiseBias : 0.4;
-      const foldChance = bias ? 0.15 * bias.foldBias : 0.15;
-      if (handStrength > 0.7 && random < raiseChance) {
+      // ===== 场景 1：无人下注，可免费过牌 =====
+      // 关键修复：能 check 就绝不 fold（过牌免费，弃牌毫无意义）
+      const raiseChance = bias ? 0.35 * bias.raiseBias : 0.35;
+      if (handStrength > 0.65 && rnd < raiseChance) {
         action = 'raise';
-        const raiseRatio = bias ? (0.3 + random * 0.3) * Math.min(1.5, bias.raiseBias) : 0.3 + random * 0.3;
-        amount = Math.floor(player.chips * Math.min(0.9, raiseRatio));
-        amount = Math.max(amount, this.room.settings.bigBlind * 2);
+        const raiseRatio = bias ? (0.3 + Math.random() * 0.3) * Math.min(1.5, bias.raiseBias) : 0.3 + Math.random() * 0.3;
+        amount = Math.floor(player.chips * Math.min(0.6, raiseRatio));
+        amount = Math.max(amount, minRaiseTotal);
         amount = Math.min(amount, player.chips);
-      } else if (handStrength < 0.3 && random < foldChance) {
-        action = 'fold';
       } else {
         action = 'check';
       }
     } else if (toCall >= player.chips) {
-      const allinChance = bias ? Math.min(0.9, 0.3 + 0.2 * bias.callBias) : 0.5;
-      if (handStrength > 0.5 || random < allinChance) {
+      // ===== 场景 2：要跟注全部身家（all-in 决策）=====
+      // 修复：不再因 allinChance 高就乱 all-in，必须基于手牌强度
+      const allinThreshold = bias ? Math.max(0.4, 0.65 - 0.1 * bias.raiseBias) : 0.65;
+      if (handStrength >= allinThreshold) {
         action = 'allin';
       } else {
-        action = 'fold';
+        // 弱牌面对全副身家下注：弃牌（紧型更容易弃，松型偶尔跟注）
+        const foldChance = bias ? Math.min(0.95, 0.85 * bias.foldBias) : 0.85;
+        action = rnd < foldChance ? 'fold' : 'call';
       }
     } else {
-      const raiseChance = bias ? (0.3 * bias.raiseBias) : 0.3;
-      const bluffRaise = bias ? Math.min(0.3, 0.1 * bias.bluffBias) : 0;
-      const foldThreshold = bias ? 0.25 * bias.foldBias : 0.25;
-      if (handStrength > 0.6 && random < raiseChance) {
+      // ===== 场景 3：正常跟注（toCall < chips）=====
+      const raiseChance = bias ? 0.28 * bias.raiseBias : 0.28;
+      const bluffRaise = bias ? Math.min(0.25, 0.08 * bias.bluffBias) : 0;
+
+      if (handStrength > 0.7 && rnd < raiseChance) {
+        // 强牌加注
         action = 'raise';
-        const raiseRatio = bias ? (0.2 + random * 0.3) * Math.min(1.5, bias.raiseBias) : 0.2 + random * 0.3;
-        amount = Math.floor(player.chips * Math.min(0.8, raiseRatio));
+        const raiseRatio = bias ? (0.2 + Math.random() * 0.3) * Math.min(1.5, bias.raiseBias) : 0.2 + Math.random() * 0.3;
+        amount = Math.floor(player.chips * Math.min(0.7, raiseRatio));
         amount = Math.max(amount, minRaiseTotal);
         amount = Math.min(amount, player.chips);
-      } else if (handStrength < 0.4 && random < bluffRaise) {
+      } else if (handStrength < 0.35 && rnd < bluffRaise) {
+        // 弱牌诈唬加注
         action = 'raise';
-        amount = Math.floor(player.chips * (0.15 + random * 0.2));
+        amount = Math.floor(player.chips * (0.15 + Math.random() * 0.2));
         amount = Math.max(amount, minRaiseTotal);
         amount = Math.min(amount, player.chips);
-      } else if (handStrength < foldThreshold && toCall > this.room.settings.bigBlind * 4 && random < 0.3) {
-        action = 'fold';
       } else {
-        action = 'call';
+        // 跟注 vs 弃牌决策：基于手牌强度 + 跟注成本
+        // 跟注成本越高，fold 阈值越高（越容易弃牌）
+        // - 跟注 < 0.5 BB：几乎不弃（limp 入池）
+        // - 跟注 1~3 BB：弱牌开始考虑弃
+        // - 跟注 > 5 BB 或 > 30% 筹码：中弱牌都会弃
+        const callInBB = toCall / bigBlind;
+        let foldThreshold: number;
+        if (callInBB <= 0.5) {
+          // 极小跟注：只有极弱牌+紧型才弃
+          foldThreshold = bias ? 0.12 * bias.foldBias : 0.12;
+        } else if (callInBB <= 2) {
+          // 小跟注：弱牌考虑弃
+          foldThreshold = bias ? 0.28 * bias.foldBias : 0.28;
+        } else if (callInBB <= 5) {
+          // 中等跟注：中弱牌考虑弃
+          foldThreshold = bias ? 0.45 * bias.foldBias : 0.45;
+        } else if (callInBB <= 10 || callCostRatio <= 0.25) {
+          // 大跟注但筹码够：中段牌也考虑弃
+          foldThreshold = bias ? 0.58 * bias.foldBias : 0.58;
+        } else {
+          // 巨额跟注（>10 BB 或 >25% 筹码）：只玩强牌
+          foldThreshold = bias ? 0.7 * bias.foldBias : 0.7;
+        }
+        // 跟注成本接近全部身家时，进一步收紧
+        if (callCostRatio > 0.5) {
+          foldThreshold = Math.min(0.85, foldThreshold + 0.15);
+        }
+
+        if (handStrength < foldThreshold) {
+          action = 'fold';
+        } else {
+          action = 'call';
+        }
       }
     }
 
+    // 加注金额不足最小加注：降级为 call/check
     if (action === 'raise' && player.chips < minRaiseTotal) {
       action = toCall > 0 ? 'call' : 'check';
       amount = 0;
     }
 
-    const result = this.handleAction(gp.playerId, action, amount);
-    if (!result.success) {
-      if (toCall <= 0) {
-        this.handleAction(gp.playerId, 'check', 0);
-      } else if (toCall < player.chips) {
-        this.handleAction(gp.playerId, 'call', 0);
-      } else {
-        this.handleAction(gp.playerId, 'fold', 0);
+    try {
+      const result = this.handleAction(gp.playerId, action, amount);
+      if (!result.success) {
+        // 兜底 1：能 check 就 check，否则 fold
+        const fallbackAction: PlayerAction = toCall <= 0 ? 'check' : 'fold';
+        const fallbackRes = this.handleAction(gp.playerId, fallbackAction, 0);
+        if (!fallbackRes.success) {
+          // 兜底 2：连 fold 都失败（currentPlayer 已错乱），强制修正状态并推进
+          console.error(`[AI] 兜底失败: ${gp.playerId} ${fallbackAction} → ${fallbackRes.error}，强制推进`);
+          // 直接让该玩家弃牌，跳过 handleAction 的校验
+          if (!gp.isFolded && !gp.isAllIn) {
+            gp.isFolded = true;
+            gp.isActive = false;
+            this.game.betHistory.push({
+              playerId: gp.playerId,
+              action: 'fold',
+              amount: 0,
+              phase: this.game.phase,
+            });
+          }
+          // 强制推进到下一位玩家，避免卡死
+          this.checkBettingRoundEnd();
+        }
+      }
+    } catch (err) {
+      // 异常兜底：任何未捕获的错误都不能让游戏卡死
+      console.error(`[AI] executeBotAction 异常:`, err, `player=${gp.playerId}`);
+      try {
+        const fallbackRes = this.handleAction(gp.playerId, 'fold', 0);
+        if (!fallbackRes.success) {
+          // 强制弃牌 + 推进
+          if (!gp.isFolded && !gp.isAllIn) {
+            gp.isFolded = true;
+            gp.isActive = false;
+          }
+          this.checkBettingRoundEnd();
+        }
+      } catch (err2) {
+        console.error(`[AI] 异常兜底也失败:`, err2);
+        // 最后手段：直接推进
+        try { this.checkBettingRoundEnd(); } catch (_) { /* ignore */ }
       }
     }
   }
@@ -1074,6 +1165,32 @@ export class GameController {
     });
   }
 
+  /**
+   * 离线玩家 AI 自动接管：能过牌就过牌，不能过牌就弃牌。
+   * 用于：1) 轮到离线玩家时立即执行；2) 超时未操作时的兜底逻辑。
+   */
+  private autoActForOfflinePlayer(gp: GamePlayer): void {
+    try {
+      const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
+      const toCall = highestBet - gp.totalBet;
+      if (toCall <= 0) {
+        const res = this.handleAction(gp.playerId, 'check', 0);
+        if (!res.success) this.handleAction(gp.playerId, 'fold', 0);
+      } else {
+        const res = this.handleAction(gp.playerId, 'fold', 0);
+        if (!res.success) {
+          // 强制弃牌 + 推进
+          if (!gp.isFolded) { gp.isFolded = true; gp.isActive = false; }
+          this.checkBettingRoundEnd();
+        }
+      }
+    } catch (err) {
+      console.error(`[离线AI] autoActForOfflinePlayer 异常:`, err);
+      if (!gp.isFolded) { gp.isFolded = true; gp.isActive = false; }
+      this.checkBettingRoundEnd();
+    }
+  }
+
   handlePlayerDisconnect(playerId: string): void {
     if (this.botPlayers.has(playerId)) return;
 
@@ -1085,18 +1202,15 @@ export class GameController {
       return;
     }
 
-    this.disconnectTimers.set(playerId, setTimeout(() => {
-      const gp = this.game.players.find(p => p.playerId === playerId);
-      if (gp && !gp.isFolded) {
-        if (this.game.players[this.game.currentPlayerIndex]?.playerId === playerId) {
-          this.handleAction(playerId, 'fold', 0);
-        } else {
-          gp.isFolded = true;
-          gp.isActive = false;
-          this.checkBettingRoundEnd();
-        }
-      }
-    }, 30000));
+    // 若当前行动玩家断线：10 秒倒计时后 AI 接管
+    const currentGp = this.game.players[this.game.currentPlayerIndex];
+    if (currentGp?.playerId === playerId) {
+      this.broadcastFn('offline_countdown', { playerId, seconds: 10 });
+      if (this.turnTimer) clearTimeout(this.turnTimer);
+      this.turnTimer = setTimeout(() => {
+        this.autoActForOfflinePlayer(currentGp);
+      }, 10000);
+    }
   }
 
   handlePlayerReconnect(playerId: string): void {
@@ -1105,6 +1219,19 @@ export class GameController {
       clearTimeout(timer);
       this.disconnectTimers.delete(playerId);
     }
+
+    // 若该玩家正是当前行动玩家，且离线倒计时正在进行：清除倒计时
+    // （resendStateForPlayer 内部会在该轮到该玩家时重新下发 your_turn 并启动正常思考倒计时）
+    const currentGp = this.game.players[this.game.currentPlayerIndex];
+    if (currentGp?.playerId === playerId && this.game.phase !== 'showdown') {
+      if (this.turnTimer) {
+        clearTimeout(this.turnTimer);
+        this.turnTimer = null;
+      }
+    }
+
+    // 重发该玩家需要的全部游戏状态：手牌、社区牌、pot、当前行动者、(若轮到自己) your_turn
+    this.resendStateForPlayer(playerId);
   }
 
   private updatePot(): void {

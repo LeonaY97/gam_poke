@@ -24,6 +24,7 @@ interface GameState {
   currentPlayerId: string | null;
   turnOptions: TurnOptions | null;
   countdown: number;
+  offlineCountdown: { playerId: string; seconds: number } | null;
   lastAction: { playerId: string; playerName: string; action: PlayerAction; amount: number } | null;
   handResult: HandResult | null;
   serverUrl: string;
@@ -36,6 +37,7 @@ interface GameState {
   setPlayerName: (name: string) => void;
   setRoom: (room: RoomListItem | null) => void;
   setInGame: (v: boolean) => void;
+  setOfflineCountdown: (data: { playerId: string; seconds: number } | null) => void;
   setMyCards: (cards: Card[]) => void;
   setCommunityCards: (cards: Card[]) => void;
   setGamePhase: (phase: GamePhase) => void;
@@ -68,6 +70,7 @@ export const useGameStore = create<GameState>((set) => ({
   currentPlayerId: null,
   turnOptions: null,
   countdown: 0,
+  offlineCountdown: null,
   lastAction: null,
   handResult: null,
   serverUrl: localStorage.getItem('poker_server_url') || 'http://localhost:3001',
@@ -98,6 +101,7 @@ export const useGameStore = create<GameState>((set) => ({
   setCurrentPlayerId: (id) => set({ currentPlayerId: id }),
   setTurnOptions: (options) => set({ turnOptions: options }),
   setCountdown: (n) => set({ countdown: n }),
+  setOfflineCountdown: (data) => set({ offlineCountdown: data }),
   setLastAction: (action) => set({ lastAction: action }),
   setHandResult: (result) => set({ handResult: result }),
   setServerUrl: (url) => {
@@ -131,6 +135,7 @@ export const useGameStore = create<GameState>((set) => ({
       currentPlayerId: null,
       turnOptions: null,
       countdown: 0,
+      offlineCountdown: null,
       lastAction: null,
       handResult: null,
       borrowRequest: null,

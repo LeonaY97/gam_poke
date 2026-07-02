@@ -40,6 +40,34 @@ function getPlayerSeatPosition(posIndex: number, totalPlayers: number): { x: num
 /** 自己的座位位置（底部中间） */
 const MY_SEAT_POSITION = { x: 50, y: 76 };
 
+/** 离线玩家倒计时横幅：橙色高亮，本地每秒递减，AI 接管前展示 */
+function OfflineCountdownBanner({ nickname, totalSeconds }: { nickname: string; totalSeconds: number }) {
+  const [remain, setRemain] = useState(totalSeconds);
+  useEffect(() => {
+    setRemain(totalSeconds);
+    const start = Date.now();
+    const total = totalSeconds * 1000;
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - start;
+      const r = Math.max(0, Math.ceil((total - elapsed) / 1000));
+      setRemain(r);
+      if (r <= 0) clearInterval(timer);
+    }, 250);
+    return () => clearInterval(timer);
+  }, [totalSeconds]);
+
+  return (
+    <div className="absolute top-10 left-0 right-0 z-50 flex justify-center pointer-events-none">
+      <div className="bg-orange-600/80 backdrop-blur-sm border border-orange-300 rounded-full px-4 py-1.5 flex items-center gap-2 shadow-lg shadow-orange-500/40">
+        <span className="w-2 h-2 bg-orange-200 rounded-full animate-ping" />
+        <span className="text-white text-xs font-bold">
+          等待离线玩家 <span className="text-yellow-100">{nickname}</span> 重连，{remain}s 后 AI 自动过牌
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function GamePage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
@@ -57,6 +85,7 @@ export default function GamePage() {
   const handResult = useGameStore(s => s.handResult);
   const borrowRequest = useGameStore(s => s.borrowRequest);
   const finalSettlement = useGameStore(s => s.finalSettlement);
+  const offlineCountdown = useGameStore(s => s.offlineCountdown);
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const connected = useGameStore(s => s.connected);
@@ -289,7 +318,7 @@ export default function GamePage() {
       </div>
 
       {/* 等待其他玩家提示条 */}
-      {isWaitingForOthers && (
+      {isWaitingForOthers && !offlineCountdown && (
         <div className="absolute top-10 left-0 right-0 z-40 flex justify-center pointer-events-none">
           <div className="bg-black/50 backdrop-blur-sm border border-yellow-500/30 rounded-full px-4 py-1.5 flex items-center gap-2 shadow-lg">
             <div className="flex gap-1">
@@ -301,6 +330,13 @@ export default function GamePage() {
           </div>
         </div>
       )}
+
+      {/* 离线玩家倒计时提示条：橙色高亮，AI 接管前显示 */}
+      {offlineCountdown && (() => {
+        const offlinePlayer = players.find(p => p.id === offlineCountdown.playerId);
+        const nick = offlinePlayer?.nickname || '玩家';
+        return <OfflineCountdownBanner key={offlineCountdown.playerId} nickname={nick} totalSeconds={offlineCountdown.seconds} />;
+      })()}
 
       {/* 牌桌区域 */}
       <div className="relative w-full h-screen pt-14 pb-28">
@@ -373,6 +409,7 @@ export default function GamePage() {
           const pos = getPlayerSeatPosition(player.posIndex, players.length);
           const isMyTurn = currentPlayerId === player.id;
           const isThinking = isMyTurn && player.id.startsWith('bot_') && !turnOptions;
+          const playerOfflineCountdown = offlineCountdown?.playerId === player.id ? offlineCountdown.seconds : null;
           return (
             <div key={player.id} onClick={() => setSelectedPlayer(player)} className="cursor-pointer">
               <PlayerSeat
@@ -384,6 +421,7 @@ export default function GamePage() {
                 isThinking={isThinking}
                 currentBet={getPlayerBet(player.id)}
                 isFolded={isPlayerFolded(player.id)}
+                offlineCountdownSeconds={playerOfflineCountdown}
                 position={pos}
               />
             </div>
@@ -445,21 +483,6 @@ export default function GamePage() {
                 if (me) setSelectedPlayer({ ...me });
               }}
             >
-              {/* 行动顺序提示：本阶段从谁开始，顺时针轮转 */}
-              <div className="flex items-center gap-1 mb-2 px-2.5 py-1 rounded-full bg-black/45 border border-amber-500/35 backdrop-blur-sm shadow-lg max-w-[90vw] overflow-x-auto">
-                <span className="text-[8px] text-amber-300/80 tracking-wide shrink-0">本手行动顺序</span>
-                {orderLabels.map((lbl, i) => (
-                  <span key={i} className="flex items-center gap-1 shrink-0">
-                    <span className={`text-[9px] font-bold tracking-wide ${
-                      lbl === firstLabel ? 'text-yellow-300' :
-                      lbl === 'BTN' ? 'text-white' :
-                      lbl === 'SB' ? 'text-blue-400' :
-                      lbl === 'BB' ? 'text-red-400' : 'text-gray-300'
-                    }`}>{lbl}</span>
-                    {i < orderLabels.length - 1 && arrowSvg}
-                  </span>
-                ))}
-              </div>
             <div className="flex gap-1.5 sm:gap-2 min-h-[80px] items-center">
               {myCards.length > 0
                 ? myCards.map((c, i) => <CardView key={i} card={c} highlight />)
@@ -503,6 +526,21 @@ export default function GamePage() {
                 )}
               </div>
             </div>
+              {/* 行动顺序提示：本阶段从谁开始，顺时针轮转（放手牌下方避免遮挡） */}
+              <div className="flex items-center gap-1 mt-2 px-2.5 py-1 rounded-full bg-black/45 border border-amber-500/35 backdrop-blur-sm shadow-lg max-w-[90vw] overflow-x-auto">
+                <span className="text-[8px] text-amber-300/80 tracking-wide shrink-0">本手行动顺序</span>
+                {orderLabels.map((lbl, i) => (
+                  <span key={i} className="flex items-center gap-1 shrink-0">
+                    <span className={`text-[9px] font-bold tracking-wide ${
+                      lbl === firstLabel ? 'text-yellow-300' :
+                      lbl === 'BTN' ? 'text-white' :
+                      lbl === 'SB' ? 'text-blue-400' :
+                      lbl === 'BB' ? 'text-red-400' : 'text-gray-300'
+                    }`}>{lbl}</span>
+                    {i < orderLabels.length - 1 && arrowSvg}
+                  </span>
+                ))}
+              </div>
           </div>
           );
         })()}
