@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { Player } from '../types/game';
+import type { Player, Card } from '../types/game';
+import CardView from './CardView';
 
 interface PlayerSeatProps {
   player: Player;
@@ -18,6 +19,8 @@ interface PlayerSeatProps {
   /** 离线倒计时总秒数（仅在该玩家处于离线等待时传入） */
   offlineCountdownSeconds?: number | null;
   position: { x: number; y: number };
+  /** 旁观者视角下显示的手牌（仅旁观者模式传入） */
+  cards?: Card[];
 }
 
 export default function PlayerSeat({
@@ -31,6 +34,7 @@ export default function PlayerSeat({
   isFolded = false,
   offlineCountdownSeconds = null,
   position,
+  cards,
 }: PlayerSeatProps) {
   // 本地倒计时：从总秒数开始每秒递减，到 0 清除
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -138,6 +142,13 @@ export default function PlayerSeat({
         <span className={`text-[8px] sm:text-[10px] px-1.5 py-0.5 rounded-full text-white ${statusBadge.color} mt-0.5`}>
           {statusBadge.text}
         </span>
+      )}
+
+      {/* 旁观者视角：显示该玩家手牌 */}
+      {cards && cards.length > 0 && !isFolded && (
+        <div className="flex gap-0.5 mt-1">
+          {cards.map((c, i) => <CardView key={i} card={c} small />)}
+        </div>
       )}
     </div>
   );

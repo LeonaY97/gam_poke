@@ -21,6 +21,8 @@ export class GameController {
   private turnTimer: ReturnType<typeof setTimeout> | null = null;
   private botTimer: ReturnType<typeof setTimeout> | null = null;
   private showdownTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 借筹码决策兜底超时（防止玩家不响应导致牌局永久卡死） */
+  private borrowTimer: ReturnType<typeof setTimeout> | null = null;
   private disconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private botPlayers: Set<string> = new Set();
   /** 等待借入决策的真人玩家 playerId 集合 */
@@ -61,7 +63,8 @@ export class GameController {
 
   startGame(): void {
     const players = this.getPlayersArray();
-    const realPlayers = players.filter(p => !p.id.startsWith('bot_'));
+    // 旁观者不参与牌局，AI 用 bot_ 前缀识别
+    const realPlayers = players.filter(p => !p.id.startsWith('bot_') && !p.isSpectator);
     const bots = players.filter(p => p.id.startsWith('bot_'));
 
     const allPlayers = [...realPlayers.filter(p => p.isConnected), ...bots];
@@ -100,8 +103,28 @@ export class GameController {
    * 调用前需已设置 this.game（含 dealerIndex）。
    */
   startNewHand(): void {
-    // 只有筹码 > 0 的玩家参与这一手
-    const allPlayers = this.getPlayersArray().filter(p => p.chips > 0);
+    // 参与这一手的玩家：筹码 > 0 且非旁观者
+    const allPlayers = this.getPlayersArray().filter(p => p.chips > 0 && !p.isSpectator);
+
+    // 兜底：可玩人数不足 2 时不开局（与 resetForNewRound 一致）
+    if (allPlayers.length < 2) {
+      console.warn(`[startNewHand] 可玩人数不足（${allPlayers.length}），放弃开局`);
+      this.room.game = null;
+      this.broadcastFn('error', { message: '游戏结束，可玩人数不足' });
+      this.broadcastFn('room_updated', {
+        room: {
+          id: this.room.id,
+          name: this.room.name,
+          hostId: this.room.hostId,
+          players: this.getPlayersArray(),
+          settings: this.room.settings,
+          game: this.game,
+          createdAt: this.room.createdAt,
+          isPaused: this.room.isPaused,
+        },
+      });
+      return;
+    }
 
     this.game.communityCards = [];
     this.game.pot = 0;
@@ -142,13 +165,44 @@ export class GameController {
     this.game.deck = remaining;
     this.game.phase = 'preflop';
 
+    // 给每位参与的真人玩家私发自己的手牌
     for (const gp of this.game.players) {
       if (!this.botPlayers.has(gp.playerId)) {
         this.privateFn(gp.playerId, 'cards_dealt', { cards: gp.hand });
       }
     }
 
+    // 给旁观者广播所有玩家手牌
+    this.broadcastSpectatorHands();
+
     setTimeout(() => this.postBlinds(), 300);
+  }
+
+  /**
+   * 广播所有玩家手牌给旁观者。
+   * 旁观者会看到所有未弃牌玩家的手牌；已弃牌玩家显示空数组。
+   * 在发牌、玩家行动（弃牌后）、新局开始时调用。
+   */
+  private broadcastSpectatorHands(): void {
+    const spectators = this.getPlayersArray().filter(p => p.isSpectator && p.isConnected);
+    if (spectators.length === 0) return;
+
+    const handsPayload = this.game.players.map(gp => {
+      const player = this.getPlayer(gp.playerId);
+      return {
+        playerId: gp.playerId,
+        nickname: player?.nickname || 'Unknown',
+        cards: gp.isFolded ? [] : gp.hand,
+        isFolded: gp.isFolded,
+      };
+    });
+
+    for (const spec of spectators) {
+      this.privateFn(spec.id, 'spectator_hands', {
+        hands: handsPayload,
+        phase: this.game.phase,
+      });
+    }
   }
 
   private postBlinds(): void {
@@ -650,12 +704,16 @@ export class GameController {
     this.findNextActivePlayer();
     const nextPlayer = this.game.players[this.game.currentPlayerIndex];
     if (nextPlayer && !nextPlayer.isFolded && !nextPlayer.isAllIn) {
-      console.log(`[轮次] 下一个行动: ${nextPlayer.nickname} (${this.game.phase})`);
+      const nextPlayerInfo = this.getPlayer(nextPlayer.playerId);
+      console.log(`[轮次] 下一个行动: ${nextPlayerInfo?.nickname || nextPlayer.playerId} (${this.game.phase})`);
       this.sendTurnToPlayer(nextPlayer);
     } else {
       console.log(`[轮次] 无可用玩家，结束本轮`);
       this.endBettingRound();
     }
+
+    // 任何行动结束后都更新旁观者视角（玩家可能已弃牌）
+    this.broadcastSpectatorHands();
   }
 
   private hasPlayerActedInRound(playerId: string): boolean {
@@ -884,6 +942,7 @@ export class GameController {
 
   /**
    * 收集筹码归零的玩家：AI 自动借入，真人加入 pendingBorrowers 并发 borrow_request。
+   * 加 30s 兜底：玩家未响应默认旁观，避免牌局永久卡死。
    */
   private collectBrokePlayersAndProceed(): void {
     this.pendingBorrowers.clear();
@@ -902,12 +961,26 @@ export class GameController {
         }
       }
     }
+
+    // 兜底：30s 内未响应借入决策的玩家默认旁观（不借入）
+    if (this.borrowTimer) clearTimeout(this.borrowTimer);
+    if (this.pendingBorrowers.size > 0) {
+      const pendingIds = Array.from(this.pendingBorrowers);
+      this.borrowTimer = setTimeout(() => {
+        for (const pid of pendingIds) {
+          if (this.pendingBorrowers.has(pid)) {
+            console.warn(`[兜底] 玩家 ${pid} 30s 未响应借入决策，默认旁观`);
+            this.resolveBorrower(pid, false);
+          }
+        }
+      }, 30000);
+    }
   }
 
   /**
    * 等待所有在线真人玩家关闭结算画面。
    * 所有玩家 ack 后（且无待借入决策）才进入下一局。
-   * 设 60s 兜底超时防止卡死。
+   * 设 60s 兜底超时防止卡死（兜底也会清 pendingBorrowers，等 borrowTimer 处理）。
    */
   private waitForHandResultAcks(): void {
     const realPlayers = this.getPlayersArray().filter(
@@ -918,6 +991,7 @@ export class GameController {
     if (this.showdownTimer) clearTimeout(this.showdownTimer);
     // 60s 兜底：防止有玩家不关闭结算画面导致卡死
     this.showdownTimer = setTimeout(() => {
+      console.warn(`[兜底] 60s 等待 ack 超时，强制推进下一局`);
       this.pendingHandResultAcks.clear();
       this.maybeProceedToNextRound();
     }, 60000);
@@ -941,10 +1015,18 @@ export class GameController {
 
   /**
    * 检查是否可以进入下一局：结算画面全部关闭 + 借入决策全部完成。
+   * 加日志便于排查"卡在清理牌局"类问题。
    */
   private maybeProceedToNextRound(): void {
     if (this.pendingHandResultAcks.size === 0 && this.pendingBorrowers.size === 0) {
+      if (this.borrowTimer) { clearTimeout(this.borrowTimer); this.borrowTimer = null; }
       this.resetForNewRound();
+    } else {
+      console.log(
+        `[maybeProceed] 暂不推进：pendingAcks=${this.pendingHandResultAcks.size} pendingBorrowers=${this.pendingBorrowers.size}`,
+        `acks=[${Array.from(this.pendingHandResultAcks).join(',')}]`,
+        `borrowers=[${Array.from(this.pendingBorrowers).join(',')}]`
+      );
     }
   }
 
@@ -1001,6 +1083,7 @@ export class GameController {
     if (this.turnTimer) clearTimeout(this.turnTimer);
     if (this.botTimer) clearTimeout(this.botTimer);
     if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    if (this.borrowTimer) { clearTimeout(this.borrowTimer); this.borrowTimer = null; }
     this.pendingBorrowers.clear();
     this.pendingHandResultAcks.clear();
     this.lastHandResult = null;
@@ -1030,6 +1113,7 @@ export class GameController {
     if (this.turnTimer) clearTimeout(this.turnTimer);
     if (this.botTimer) clearTimeout(this.botTimer);
     if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    if (this.borrowTimer) { clearTimeout(this.borrowTimer); this.borrowTimer = null; }
     this.pendingBorrowers.clear();
     this.pendingHandResultAcks.clear();
     this.lastHandResult = null;
@@ -1108,6 +1192,8 @@ export class GameController {
 
     // 所有借入决策完成，检查是否可以进入下一局
     if (this.pendingBorrowers.size === 0) {
+      // 借入决策已全部完成，清掉 borrow 兜底定时器
+      if (this.borrowTimer) { clearTimeout(this.borrowTimer); this.borrowTimer = null; }
       // 短暂延迟让前端看到决策结果
       if (this.showdownTimer) clearTimeout(this.showdownTimer);
       this.showdownTimer = setTimeout(() => {
@@ -1198,6 +1284,11 @@ export class GameController {
     if (this.game.phase === 'showdown') {
       this.pendingHandResultAcks.delete(playerId);
       this.pendingBorrowers.delete(playerId);
+      // 若所有借入决策已结束，清掉 borrow 兜底定时器
+      if (this.pendingBorrowers.size === 0 && this.borrowTimer) {
+        clearTimeout(this.borrowTimer);
+        this.borrowTimer = null;
+      }
       this.maybeProceedToNextRound();
       return;
     }
@@ -1319,6 +1410,39 @@ export class GameController {
    * 玩家重连后，重新发送该玩家需要的游戏状态。
    */
   resendStateForPlayer(playerId: string): void {
+    // 旁观者重连：广播当前所有玩家手牌 + 社区牌 + pot 状态
+    const player = this.getPlayer(playerId);
+    if (player?.isSpectator) {
+      // 重发社区牌
+      if (this.game.communityCards.length > 0) {
+        this.privateFn(playerId, 'community_cards', {
+          cards: this.game.communityCards,
+          phase: this.game.phase,
+        });
+      }
+      // 重发 pot
+      this.privateFn(playerId, 'pot_updated', {
+        pot: this.game.pot,
+        sidePots: this.game.sidePots,
+      });
+      // 重发 turn_changed
+      const currentGp = this.game.players[this.game.currentPlayerIndex];
+      if (currentGp) {
+        this.privateFn(playerId, 'turn_changed', {
+          currentPlayerId: currentGp.playerId,
+          phase: this.game.phase,
+          pot: this.game.pot,
+        });
+      }
+      // 重发旁观者手牌
+      this.broadcastSpectatorHands();
+      // 摊牌阶段：重发结算画面
+      if (this.game.phase === 'showdown' && this.lastHandResult) {
+        this.privateFn(playerId, 'hand_result', this.lastHandResult);
+      }
+      return;
+    }
+
     // 摊牌阶段：重发结算画面，让玩家能看到结果并 ack
     if (this.game.phase === 'showdown') {
       if (this.lastHandResult) {

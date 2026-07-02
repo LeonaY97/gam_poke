@@ -9,6 +9,14 @@ export interface DanmakuItem {
   nickname: string;
   text: string;
   color: string;
+  isSpectator?: boolean;
+}
+
+export interface SpectatorPlayerHand {
+  playerId: string;
+  nickname: string;
+  cards: Card[];
+  isFolded: boolean;
 }
 
 interface GameState {
@@ -17,7 +25,11 @@ interface GameState {
   playerName: string;
   room: RoomListItem | null;
   inGame: boolean;
+  /** 当前玩家是否是旁观者 */
+  isSpectator: boolean;
   myCards: Card[];
+  /** 旁观者视角下所有玩家的手牌 */
+  spectatorHands: SpectatorPlayerHand[];
   communityCards: Card[];
   gamePhase: GamePhase;
   pot: number;
@@ -37,8 +49,10 @@ interface GameState {
   setPlayerName: (name: string) => void;
   setRoom: (room: RoomListItem | null) => void;
   setInGame: (v: boolean) => void;
+  setIsSpectator: (v: boolean) => void;
   setOfflineCountdown: (data: { playerId: string; seconds: number } | null) => void;
   setMyCards: (cards: Card[]) => void;
+  setSpectatorHands: (hands: SpectatorPlayerHand[]) => void;
   setCommunityCards: (cards: Card[]) => void;
   setGamePhase: (phase: GamePhase) => void;
   setPot: (pot: number) => void;
@@ -50,20 +64,22 @@ interface GameState {
   setServerUrl: (url: string) => void;
   setBorrowRequest: (req: { borrowCount: number; initialChips: number } | null) => void;
   setFinalSettlement: (data: FinalSettlementData | null) => void;
-  addDanmaku: (danmaku: { nickname: string; text: string; color: string }) => void;
+  addDanmaku: (danmaku: { nickname: string; text: string; color: string; isSpectator?: boolean }) => void;
   removeDanmaku: (id: number) => void;
   reset: () => void;
 }
 
 let danmakuIdCounter = 0;
 
-export const useGameStore = create<GameState>((set) => ({
+export const useGameStore = create<GameState>((set, get) => ({
   connected: false,
   playerId: localStorage.getItem('poker_player_id') || null,
   playerName: localStorage.getItem('poker_nickname') || '',
   room: null,
   inGame: false,
+  isSpectator: false,
   myCards: [],
+  spectatorHands: [],
   communityCards: [],
   gamePhase: 'waiting',
   pot: 0,
@@ -94,7 +110,9 @@ export const useGameStore = create<GameState>((set) => ({
     set({ room });
   },
   setInGame: (v) => set({ inGame: v }),
+  setIsSpectator: (v) => set({ isSpectator: v }),
   setMyCards: (cards) => set({ myCards: cards }),
+  setSpectatorHands: (hands) => set({ spectatorHands: hands }),
   setCommunityCards: (cards) => set({ communityCards: cards }),
   setGamePhase: (phase) => set({ gamePhase: phase }),
   setPot: (pot) => set({ pot }),
@@ -114,21 +132,27 @@ export const useGameStore = create<GameState>((set) => ({
     const id = ++danmakuIdCounter;
     const item: DanmakuItem = { id, ...danmaku };
     set((state) => ({ danmakus: [...state.danmakus.slice(-8), item] }));
-    // 6秒后移除
+    // 40 秒后移除（覆盖最大动画时长 36s + 缓冲，避免动画没飞完就被卸载）
     setTimeout(() => {
       useGameStore.getState().removeDanmaku(id);
-    }, 6000);
+    }, 40000);
   },
   removeDanmaku: (id) => set((state) => ({ danmakus: state.danmakus.filter(d => d.id !== id) })),
   reset: () => {
     localStorage.removeItem('poker_player_id');
     localStorage.removeItem('poker_room_code');
+    const { connected, serverUrl } = get();
     set({
-      connected: false,
+      // 保留 connected 和 serverUrl：由 socket 的 connect/disconnect 事件管理，
+      // 避免 reset 把已连接的 socket 状态错误地标记为断开
+      connected,
+      serverUrl,
       playerId: null,
       room: null,
       inGame: false,
+      isSpectator: false,
       myCards: [],
+      spectatorHands: [],
       communityCards: [],
       gamePhase: 'waiting',
       pot: 0,

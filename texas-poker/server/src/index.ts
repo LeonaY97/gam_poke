@@ -48,6 +48,41 @@ app.get('/api/room/:roomCode', (req, res) => {
   res.json({ room: roomManager.toRoomListItem(room) });
 });
 
+// 清空房间：销毁全部 GameController + 房间，并强制断开所有 socket，
+// 让所有客户端回到首页。用于"卡死/僵尸状态"时一键重置。
+app.post('/api/cleanup', (_req, res) => {
+  try {
+    const result = roomManager.clearAll();
+    // 清空 socket → 房间 / playerId 映射
+    playerRoomMap.clear();
+    playerIdToSocket.clear();
+    // 强制断开所有已连接的 socket，让客户端回到首页
+    io.disconnectSockets(true);
+    console.log(`[清理] 已清空 ${result.rooms} 个房间、${result.controllers} 个 GameController，断开所有连接`);
+    res.json({ success: true, ...result });
+  } catch (e: any) {
+    console.error('[清理] 失败:', e);
+    res.status(500).json({ success: false, error: e?.message || '清理失败' });
+  }
+});
+
+// 重启服务：清理全部状态（房间/GameController/连接映射），断开所有客户端
+// 不退出进程——tsx watch 在 sandbox 环境下自动重启不可靠，改为进程内重置更稳
+app.post('/api/restart', (_req, res) => {
+  try {
+    console.log('[重启] 开始清理状态...');
+    const result = roomManager.clearAll();
+    playerRoomMap.clear();
+    playerIdToSocket.clear();
+    io.disconnectSockets(true);
+    console.log(`[重启] 已清理 ${result.rooms} 个房间、${result.controllers} 个 GameController，客户端将被断开`);
+    res.json({ success: true, ...result, message: '服务已重置' });
+  } catch (e: any) {
+    console.error('[重启] 失败:', e);
+    res.status(500).json({ success: false, error: e?.message || '重启失败' });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log(`[连接] ${socket.id}`);
 
@@ -72,12 +107,23 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join_room', (data, callback) => {
-    const result = roomManager.joinRoom(data.roomCode, data.nickname);
-    if (!result) {
-      return callback({ success: false, error: '房间不存在或已满或游戏已开始' });
+    const asSpectator = data.asSpectator === true;
+    const result = roomManager.joinRoom(data.roomCode, data.nickname, asSpectator);
+
+    // 失败分支
+    if ('error' in result) {
+      // 房间已满且玩家未选择旁观 → 返回特殊标记，前端询问
+      if (result.error === 'ROOM_FULL' && !asSpectator) {
+        return callback({
+          success: false,
+          error: '房间已满，是否以旁观者身份加入？旁观者可查看所有玩家手牌',
+          spectatorNote: 'ROOM_FULL_ASK_SPECTATOR',
+        });
+      }
+      return callback({ success: false, error: result.error });
     }
 
-    const { room, playerId } = result;
+    const { room, playerId, isSpectator } = result;
     playerRoomMap.set(socket.id, room.id);
     playerIdToSocket.set(playerId, socket.id);
     socket.join(room.id);
@@ -87,11 +133,13 @@ io.on('connection', (socket) => {
       success: true,
       room: roomManager.toRoomListItem(room),
       playerId,
+      isSpectator,
+      spectatorNote: isSpectator ? '你正以旁观者身份加入，可查看所有玩家手牌' : undefined,
     });
 
     const roomData = roomManager.toRoomListItem(room);
     io.to(room.id).emit('room_updated', { room: roomData });
-    console.log(`[房间] ${data.nickname} 加入了房间 ${room.id}`);
+    console.log(`[房间] ${data.nickname} ${isSpectator ? '以旁观者' : ''}加入了房间 ${room.id}`);
   });
 
   socket.on('reconnect_player', (data, callback) => {
@@ -127,16 +175,32 @@ io.on('connection', (socket) => {
     callback({ success: true, room: roomManager.toRoomListItem(room) });
   });
 
-  socket.on('start_game', (data) => {
+  socket.on('start_game', (data, callback) => {
     const roomCode = data.roomCode;
     const room = roomManager.getRoom(roomCode);
-    if (!room) return;
+    if (!room) {
+      return callback?.({ success: false, error: '房间不存在' });
+    }
 
     const playerId = Array.from(playerIdToSocket.entries())
       .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId || playerId !== room.hostId) return;
+    if (!playerId || playerId !== room.hostId) {
+      return callback?.({ success: false, error: '只有房主才能开始游戏' });
+    }
+
+    // 防重复：游戏已在进行中则拒绝再次 start
+    const existingController = roomManager.getGameController(roomCode);
+    if (existingController && room.game && room.game.phase !== 'waiting') {
+      console.log(`[游戏] 房间 ${roomCode} 游戏已在进行中，忽略重复 start_game`);
+      return callback?.({ success: true, message: '游戏已在进行中' });
+    }
 
     try {
+      // 清理旧 controller（如果有）：销毁其 timer 避免僵尸 timer 干扰新 game
+      if (existingController) {
+        existingController.destroy();
+      }
+
       const controller = new GameController(
         room,
         (event, payload) => {
@@ -155,8 +219,10 @@ io.on('connection', (socket) => {
       // 导致位置标记(BTN/SB/BB)标错座位、行动顺序看起来跳跃。
       io.to(roomCode).emit('room_updated', { room: roomManager.toRoomListItem(room) });
       console.log(`[游戏] 房间 ${roomCode} 游戏开始`);
+      callback?.({ success: true });
     } catch (e: any) {
-      socket.emit('error', { message: e?.message || '无法开始游戏' });
+      console.error(`[游戏] startGame 异常:`, e);
+      callback?.({ success: false, error: e?.message || '无法开始游戏' });
     }
   });
 
@@ -182,35 +248,10 @@ io.on('connection', (socket) => {
     callback(result);
   });
 
+  // borrow_chips：玩家借筹码决策（前端唯一调用的入口）。
+  // 内部委托给 controller.resolveBorrower，由其统一处理状态机推进（清 pendingBorrowers）。
   socket.on('borrow_chips', (data, callback) => {
-    const roomCode = data.roomCode;
-    const room = roomManager.getRoom(roomCode);
-    if (!room) return callback({ success: false, error: '房间不存在' });
-
-    const playerId = Array.from(playerIdToSocket.entries())
-      .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId) return callback({ success: false, error: '找不到玩家信息' });
-
-    const player = room.players instanceof Map ? room.players.get(playerId) : null;
-    if (!player) return callback({ success: false, error: '玩家不在房间中' });
-
-    if (player.borrowCount <= 0) {
-      return callback({ success: false, error: '借入次数已用完' });
-    }
-
-    const initialChips = room.settings.initialChips;
-    player.chips += initialChips;
-    player.borrowCount--;
-
-    const roomData = roomManager.toRoomListItem(room);
-    io.to(roomCode).emit('room_updated', { room: roomData });
-
-    callback({ success: true });
-    console.log(`[借入] ${player.nickname} 借入 ${initialChips} 筹码，剩余 ${player.borrowCount} 次`);
-  });
-
-  socket.on('resolve_borrow', (data, callback) => {
-    const roomCode = playerRoomMap.get(socket.id);
+    const roomCode = data.roomCode || playerRoomMap.get(socket.id);
     if (!roomCode) return callback({ success: false, error: '你不在任何房间中' });
 
     const playerId = Array.from(playerIdToSocket.entries())
@@ -227,19 +268,23 @@ io.on('connection', (socket) => {
     console.log(`[借入] 玩家 ${playerId} ${borrow ? '借入筹码' : '选择旁观'}`);
   });
 
-  socket.on('next_hand', () => {
+  // resolve_borrow：保留为别名（向后兼容）
+  socket.on('resolve_borrow', (data, callback) => {
     const roomCode = playerRoomMap.get(socket.id);
-    if (!roomCode) return;
+    if (!roomCode) return callback({ success: false, error: '你不在任何房间中' });
 
     const playerId = Array.from(playerIdToSocket.entries())
       .find(([, sid]) => sid === socket.id)?.[0];
-    if (!playerId) return;
+    if (!playerId) return callback({ success: false, error: '找不到玩家信息' });
 
     const controller = roomManager.getGameController(roomCode);
-    if (!controller) return;
+    if (!controller) return callback({ success: false, error: '游戏未开始' });
 
-    controller.startNewHand();
-    console.log(`[游戏] 房间 ${roomCode} 开始新一局`);
+    const borrow = data.borrow !== false;
+    controller.resolveBorrower(playerId, borrow);
+
+    callback({ success: true });
+    console.log(`[借入] 玩家 ${playerId} ${borrow ? '借入筹码' : '选择旁观'}`);
   });
 
   socket.on('pause_game', () => {
@@ -388,6 +433,7 @@ io.on('connection', (socket) => {
       nickname: player.nickname,
       text,
       color,
+      isSpectator: player.isSpectator === true,
     });
   });
 

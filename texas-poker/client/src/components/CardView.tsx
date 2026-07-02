@@ -26,10 +26,13 @@ interface CardProps {
   highlight?: boolean;
   /** 是否播放发牌动画（从上方落下）*/
   deal?: boolean;
+  /** 置灰显示（如自己已弃牌）*/
+  dimmed?: boolean;
 }
 
-export default function CardView({ card, faceDown, small, highlight, deal }: CardProps) {
+export default function CardView({ card, faceDown, small, highlight, deal, dimmed }: CardProps) {
   const animClass = deal ? 'card-deal' : 'card-enter';
+  const dimClass = dimmed ? 'opacity-40 grayscale' : '';
   if (faceDown || !card) {
     return (
       <div
@@ -37,7 +40,7 @@ export default function CardView({ card, faceDown, small, highlight, deal }: Car
           inline-flex items-center justify-center rounded-lg font-bold shadow-lg
           bg-gradient-to-br from-blue-700 to-blue-900 border-2 border-blue-500
           ${small ? 'w-8 h-12 text-xs' : 'w-12 h-16 sm:w-14 sm:h-20 text-sm sm:text-base'}
-          ${animClass}
+          ${animClass} ${dimClass}
         `}
       >
         <div className="w-5/6 h-5/6 rounded border border-blue-400 flex items-center justify-center">
@@ -57,7 +60,7 @@ export default function CardView({ card, faceDown, small, highlight, deal }: Car
         inline-flex flex-col items-center justify-center rounded-lg font-bold shadow-lg bg-white border-2
         ${highlight ? 'border-yellow-400 ring-2 ring-yellow-300' : 'border-gray-300'}
         ${small ? 'w-8 h-12 text-xs' : 'w-12 h-16 sm:w-14 sm:h-20 text-sm sm:text-base'}
-        ${animClass}
+        ${animClass} ${dimClass}
       `}
     >
       <span className={`${colorClass} leading-none`}>{rankLabel}</span>

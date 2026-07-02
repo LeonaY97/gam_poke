@@ -23,6 +23,7 @@ export default function HomePage() {
   const [serverUrlInput, setServerUrlInput] = useState(getServerUrl());
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState('');
+  const [submittingAction, setSubmittingAction] = useState<'create' | 'join' | null>(null);
   const [searchParams] = useSearchParams();
 
   const navigate = useNavigate();
@@ -117,7 +118,14 @@ export default function HomePage() {
     if (!ws?.connected) { alert('请先连接服务器'); return; }
     localStorage.setItem('poker_nickname', nickname);
     useGameStore.getState().setPlayerName(nickname);
+    setSubmittingAction('create');
+    // 超时兜底：10s 没收到 ack 自动恢复
+    const safety = setTimeout(() => {
+      setSubmittingAction(null);
+      alert('创建房间超时，请检查网络后重试');
+    }, 10000);
     ws.emit('create_room', { nickname, settings }, (res: any) => {
+      clearTimeout(safety);
       if (res.success && res.roomCode) {
         setShowCreate(false);
         if (res.room) useGameStore.getState().setRoom(res.room as RoomListItem);
@@ -126,6 +134,7 @@ export default function HomePage() {
       } else {
         alert(res.error || '创建房间失败');
       }
+      setSubmittingAction(null);
     });
   }, [getSocket, navigate]);
 
@@ -134,14 +143,54 @@ export default function HomePage() {
     if (!ws?.connected) { alert('请先连接服务器'); return; }
     localStorage.setItem('poker_nickname', nickname);
     useGameStore.getState().setPlayerName(nickname);
+    setSubmittingAction('join');
+    const safety = setTimeout(() => {
+      setSubmittingAction(null);
+      alert('加入房间超时，请检查网络后重试');
+    }, 10000);
     ws.emit('join_room', { roomCode, nickname }, (res: any) => {
+      clearTimeout(safety);
       if (res.success && res.room) {
         setShowJoin(false);
         useGameStore.getState().setRoom(res.room as RoomListItem);
         if (res.playerId) useGameStore.getState().setPlayerId(res.playerId);
+        // 标记旁观者身份
+        useGameStore.getState().setIsSpectator(res.isSpectator === true);
+        // 旁观者提示
+        if (res.spectatorNote) {
+          alert(res.spectatorNote);
+        }
         navigate(`/room/${roomCode}`);
+      } else if (res.spectatorNote === 'ROOM_FULL_ASK_SPECTATOR') {
+        // 房间已满，询问是否以旁观者身份加入
+        const ok = window.confirm(res.error || '房间已满，是否以旁观者身份加入？');
+        if (ok) {
+          // 重新 emit，带 asSpectator=true
+          setSubmittingAction('join');
+          const safety2 = setTimeout(() => {
+            setSubmittingAction(null);
+            alert('加入房间超时，请检查网络后重试');
+          }, 10000);
+          ws.emit('join_room', { roomCode, nickname, asSpectator: true }, (res2: any) => {
+            clearTimeout(safety2);
+            if (res2.success && res2.room) {
+              setShowJoin(false);
+              useGameStore.getState().setRoom(res2.room as RoomListItem);
+              if (res2.playerId) useGameStore.getState().setPlayerId(res2.playerId);
+              useGameStore.getState().setIsSpectator(res2.isSpectator === true);
+              if (res2.spectatorNote) alert(res2.spectatorNote);
+              navigate(`/room/${roomCode}`);
+            } else {
+              alert(res2.error || '加入房间失败');
+            }
+            setSubmittingAction(null);
+          });
+          return;
+        }
+        setSubmittingAction(null);
       } else {
         alert(res.error || '加入房间失败');
+        setSubmittingAction(null);
       }
     });
   }, [getSocket, navigate]);
@@ -152,6 +201,25 @@ export default function HomePage() {
       setShowSettings(false);
     }
   };
+
+  // 重启服务：调用后端 /api/restart，后端清理状态并断开所有连接，前端 1 秒后刷新
+  // 关键：定时刷新不依赖 fetch 完成（fetch 可能因 socket 断开而卡住）
+  const [cleaning, setCleaning] = useState(false);
+  const handleCleanup = useCallback(() => {
+    if (!window.confirm('确定重启服务吗？\n\n这会：\n• 清理所有房间和牌局\n• 断开所有玩家连接\n• 重新加载前端页面\n\n适合在卡死/僵尸状态时一键重置。')) return;
+    setCleaning(true);
+    // 清空本地缓存与 store（立即执行）
+    localStorage.removeItem('poker_player_id');
+    localStorage.removeItem('poker_room_code');
+    useGameStore.getState().reset();
+
+    // 先安排刷新（不依赖 fetch 结果），1.5 秒后必定刷新
+    setTimeout(() => window.location.reload(), 1500);
+
+    // 异步发请求通知后端清理（fire-and-forget，不等返回）
+    const httpBase = getServerUrl().replace(/\/+$/, '');
+    fetch(`${httpBase}/api/restart`, { method: 'POST' }).catch(() => {});
+  }, []);
 
   const shareableUrl = connected && getServerUrl() && window.location.hostname !== 'localhost'
     ? `${window.location.origin}?server=${encodeURIComponent(getServerUrl())}`
@@ -195,12 +263,21 @@ export default function HomePage() {
 
             <button onClick={() => setShowCreate(true)} className="w-full py-4 rounded-2xl bg-gradient-to-r from-yellow-500 to-yellow-600 text-black font-bold text-lg shadow-lg hover:from-yellow-400 hover:to-yellow-500 transition-all active:scale-95">创建房间</button>
             <button onClick={() => setShowJoin(true)} className="w-full py-4 rounded-2xl bg-gray-700 text-white font-bold text-lg border border-gray-600 hover:bg-gray-600 transition-all active:scale-95">加入房间</button>
+            <button
+              onClick={handleCleanup}
+              disabled={cleaning}
+              className="w-full py-2.5 rounded-xl bg-red-900/40 text-red-300 font-semibold text-sm border border-red-700/50 hover:bg-red-900/60 hover:text-red-200 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              title="重启后端服务（清理所有房间和牌局）并刷新页面"
+            >
+              {cleaning && <span className="animate-spin w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full" />}
+              {cleaning ? '重启中...1.5 秒后刷新' : '🔄 重启服务'}
+            </button>
           </>
         )}
       </div>
 
-      {showCreate && <CreateRoomModal onClose={() => setShowCreate(false)} onCreate={handleCreate} />}
-      {showJoin && <JoinRoomModal onClose={() => setShowJoin(false)} onJoin={handleJoin} />}
+      {showCreate && <CreateRoomModal onClose={() => setShowCreate(false)} onCreate={handleCreate} submitting={submittingAction === 'create'} />}
+      {showJoin && <JoinRoomModal onClose={() => setShowJoin(false)} onJoin={handleJoin} submitting={submittingAction === 'join'} />}
 
       {showSettings && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">

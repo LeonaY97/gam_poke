@@ -37,9 +37,13 @@ export default function App() {
     // 这样 socket connect 事件才能 emit reconnect_player
     if (storedPlayerId && storedRoomCode) {
       const httpBase = url.replace(/\/+$/, '');
-      fetch(`${httpBase}/api/room/${storedRoomCode}`)
+      // 超时控制器：5s 拉不到就放弃，直接走重连流程
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      fetch(`${httpBase}/api/room/${storedRoomCode}`, { signal: controller.signal })
         .then(r => r.json())
         .then(data => {
+          clearTimeout(timeout);
           if (data.room) {
             const st = useGameStore.getState();
             st.setRoom(data.room as RoomListItem);
@@ -54,7 +58,11 @@ export default function App() {
             localStorage.removeItem('poker_room_code');
           }
         })
-        .catch(() => {})
+        .catch(() => {
+          clearTimeout(timeout);
+          // HTTP 拉取失败（超时/网络错误），不阻塞 socket 重连
+          // socket reconnect_player 会再次从服务端拉取 room
+        })
         .finally(() => connect(url));
     } else {
       connect(url);

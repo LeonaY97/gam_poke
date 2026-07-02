@@ -30,6 +30,12 @@ export interface Player {
   borrowCount: number;
   /** AI 人设 ID，仅 AI 玩家有此字段 */
   aiPersonaId?: string;
+  /** 旁观者：不参与牌局，可看所有人手牌；isAI 字段在 RoomManager 中运行时存在 */
+  isSpectator?: boolean;
+  /** AI 标记（运行时存在，接口未声明以保持向后兼容） */
+  isAI?: boolean;
+  /** AI 难度（运行时存在，接口未声明以保持向后兼容） */
+  aiDifficulty?: string;
 }
 
 export interface GamePlayer {
@@ -171,13 +177,15 @@ export interface ServerToClientEvents {
   borrow_request: (data: { playerId: string; borrowCount: number; initialChips: number }) => void;
   player_disconnected: (data: { playerId: string; nickname: string }) => void;
   final_settlement: (data: FinalSettlementData) => void;
-  danmaku_received: (data: { playerId: string; nickname: string; text: string; color: string }) => void;
+  danmaku_received: (data: { playerId: string; nickname: string; text: string; color: string; isSpectator?: boolean }) => void;
+  /** 旁观者专用：广播所有玩家手牌 */
+  spectator_hands: (data: { hands: { playerId: string; nickname: string; cards: Card[]; isFolded: boolean }[]; phase: GamePhase }) => void;
   error: (data: { message: string }) => void;
 }
 
 export interface ClientToServerEvents {
   create_room: (data: { nickname: string; settings: Partial<RoomSettings> }, callback: (res: { success: boolean; roomCode?: string; playerId?: string; room?: RoomListItem; error?: string }) => void) => void;
-  join_room: (data: { roomCode: string; nickname: string }, callback: (res: { success: boolean; room?: RoomListItem; playerId?: string; error?: string }) => void) => void;
+  join_room: (data: { roomCode: string; nickname: string; asSpectator?: boolean }, callback: (res: { success: boolean; room?: RoomListItem; playerId?: string; error?: string; isSpectator?: boolean; spectatorNote?: string }) => void) => void;
   reconnect_player: (data: { playerId: string; roomCode: string }, callback: (res: { success: boolean; room?: RoomListItem; error?: string }) => void) => void;
   borrow_chips: (data: { roomCode: string; borrow?: boolean }, callback: (res: { success: boolean; room?: RoomListItem; error?: string }) => void) => void;
   ack_hand_result: () => void;
@@ -185,7 +193,7 @@ export interface ClientToServerEvents {
   restart_game: () => void;
   continue_game: () => void;
   send_danmaku: (data: { text: string; color?: string }) => void;
-  start_game: (data: { roomCode: string }) => void;
+  start_game: (data: { roomCode: string }, callback?: (res: { success: boolean; error?: string; message?: string }) => void) => void;
   player_action: (data: { action: PlayerAction; amount?: number }, callback: (res: { success: boolean; error?: string }) => void) => void;
   leave_room: () => void;
   kick_player: (data: { playerId: string }) => void;

@@ -32,6 +32,7 @@ export function useSocket() {
     });
 
     socket.on('connect', () => {
+      console.log('[socket] connected, id=', socket!.id);
       const st = useGameStore.getState();
       st.setConnected(true);
 
@@ -42,9 +43,23 @@ export function useSocket() {
       // （socket 重连后 socket.id 会变，必须重新关联，否则收不到 cards_dealt/your_turn）
       const { playerId, room } = st;
       if (playerId && room) {
+        // 重连超时兜底：5s 没收到 ack，认为重连失败
+        const reconnectTimeout = setTimeout(() => {
+          console.warn('[重连] reconnect_player 5s 未响应，视为失败');
+          localStorage.removeItem('poker_player_id');
+          localStorage.removeItem('poker_room_code');
+          useGameStore.getState().reset();
+        }, 5000);
         socket!.emit('reconnect_player', { playerId, roomCode: room.id }, (res: any) => {
+          clearTimeout(reconnectTimeout);
           if (res.success && res.room) {
             useGameStore.getState().setRoom(res.room as RoomListItem);
+            // 重连成功后让 GameController 重发状态
+            const controller = (window as any).__gameControllerCache?.[room.id];
+            if (controller && res.room.game && res.room.game.phase !== 'waiting') {
+              useGameStore.getState().setInGame(true);
+              useGameStore.getState().setGamePhase(res.room.game.phase);
+            }
           } else {
             // 重连失败（房间已解散或玩家被清理），清掉持久化数据
             localStorage.removeItem('poker_player_id');
@@ -55,8 +70,14 @@ export function useSocket() {
       }
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
+      console.log('[socket] disconnected, reason=', reason);
       useGameStore.getState().setConnected(false);
+      // io server disconnect（服务端主动断开，如 cleanup）不会自动重连，需要手动重连
+      if (reason === 'io server disconnect' && socket) {
+        console.log('[socket] 服务端主动断开，1s 后手动重连');
+        setTimeout(() => { try { socket!.connect(); } catch (e) { console.error('[socket] 重连失败', e); } }, 1000);
+      }
     });
 
     socket.on('room_created', (data: { roomCode: string; playerId: string; room?: RoomListItem }) => {
@@ -81,6 +102,7 @@ export function useSocket() {
     });
 
     socket.on('game_started', (data: { seats?: any[]; dealerPos?: number; currentPlayerId?: string }) => {
+      console.log('[socket] game_started, seats=', data.seats?.length, 'dealer=', data.dealerPos);
       const st = useGameStore.getState();
       st.setInGame(true);
       st.setGamePhase('preflop');
@@ -141,6 +163,7 @@ export function useSocket() {
     });
 
     socket.on('your_turn', (data: { options: TurnOptions; phase: GamePhase; pot: number }) => {
+      console.log('[socket] your_turn, phase=', data.phase, 'pot=', data.pot);
       const st = useGameStore.getState();
       st.setTurnOptions(data.options);
       st.setCurrentPlayerId(st.playerId);
@@ -160,6 +183,7 @@ export function useSocket() {
     });
 
     socket.on('turn_changed', (data: { currentPlayerId: string; phase: GamePhase; pot: number }) => {
+      console.log('[socket] turn_changed, player=', data.currentPlayerId, 'phase=', data.phase);
       const st = useGameStore.getState();
       st.setCurrentPlayerId(data.currentPlayerId);
       st.setGamePhase(data.phase);
@@ -259,12 +283,17 @@ export function useSocket() {
       useGameStore.getState().setFinalSettlement(data);
     });
 
-    socket.on('danmaku_received', (data: { playerId: string; nickname: string; text: string; color: string }) => {
+    socket.on('danmaku_received', (data: { playerId: string; nickname: string; text: string; color: string; isSpectator?: boolean }) => {
       useGameStore.getState().addDanmaku({
         nickname: data.nickname,
         text: data.text,
         color: data.color,
+        isSpectator: data.isSpectator,
       });
+    });
+
+    socket.on('spectator_hands', (data: { hands: { playerId: string; nickname: string; cards: Card[]; isFolded: boolean }[]; phase: GamePhase }) => {
+      useGameStore.getState().setSpectatorHands(data.hands);
     });
 
     socket.on('error', (data: { message: string }) => {

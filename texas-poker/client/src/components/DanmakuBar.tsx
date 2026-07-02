@@ -9,6 +9,23 @@ export default function DanmakuBar() {
   const inputRef = useRef<HTMLInputElement>(null);
   const danmakus = useGameStore((s) => s.danmakus);
 
+  // 根据屏幕宽度计算弹幕飞行时长（秒）
+  // 手机窄（<640px）→ 18s 较快；电脑宽（≥1280px）→ 36s 较慢，看得清楚
+  const [duration, setDuration] = useState(24);
+  useEffect(() => {
+    const calc = () => {
+      const w = window.innerWidth;
+      if (w < 640) setDuration(18);
+      else if (w < 1024) setDuration(24);
+      else if (w < 1440) setDuration(30);
+      else setDuration(36);
+    };
+    calc();
+    window.addEventListener('resize', calc);
+    return () => window.removeEventListener('resize', calc);
+  }, []);
+
+  // store 中弹幕存活时长也要匹配飞行时长，避免动画没飞完就被移除
   useEffect(() => {
     if (showInput) inputRef.current?.focus();
   }, [showInput]);
@@ -32,13 +49,17 @@ export default function DanmakuBar() {
           return (
             <div
               key={d.id}
-              className="danmaku-fly absolute whitespace-nowrap text-xl sm:text-2xl font-bold"
+              className="absolute whitespace-nowrap text-xl sm:text-2xl font-bold"
               style={{
                 top: `${track}rem`,
                 color: d.color,
                 textShadow: '0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.8)',
+                animation: `danmakuFlyResponsive ${duration}s linear forwards`,
               }}
             >
+              {d.isSpectator && (
+                <span className="text-[10px] bg-cyan-500/30 text-cyan-200 px-1 py-0.5 rounded mr-1 align-middle">旁观</span>
+              )}
               <span className="opacity-70 text-base sm:text-lg mr-1">{d.nickname}:</span>
               {d.text}
             </div>

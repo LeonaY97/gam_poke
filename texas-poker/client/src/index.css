@@ -73,12 +73,8 @@ body {
   }
 }
 
-/* 弹幕飞行动画（速度调到最慢：60 秒走完全屏） */
-.danmaku-fly {
-  animation: danmakuFly 60s linear;
-}
-
-@keyframes danmakuFly {
+/* 弹幕飞行动画（响应式：由 DanmakuBar 内联 style 指定 duration） */
+@keyframes danmakuFlyResponsive {
   0% {
     opacity: 0;
     transform: translateX(100vw);

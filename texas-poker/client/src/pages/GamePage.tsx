@@ -12,6 +12,7 @@ import RoundTransitionOverlay from '../components/RoundTransitionOverlay';
 import FinalSettlementModal from '../components/FinalSettlementModal';
 import DanmakuBar from '../components/DanmakuBar';
 import SettingsModal from '../components/SettingsModal';
+import WaitingBanner from '../components/WaitingBanner';
 import type { RoomListItem, Player, GamePlayer, BetRecord } from '../types/game';
 
 /**
@@ -73,11 +74,14 @@ export default function GamePage() {
   const navigate = useNavigate();
   const { getSocket } = useSocket();
   const [fetching, setFetching] = useState(true);
+  const [fetchTimeout, setFetchTimeout] = useState(false);
 
   const inGame = useGameStore(s => s.inGame);
   const room = useGameStore(s => s.room);
   const playerId = useGameStore(s => s.playerId);
   const myCards = useGameStore(s => s.myCards);
+  const isSpectator = useGameStore(s => s.isSpectator);
+  const spectatorHands = useGameStore(s => s.spectatorHands);
   const communityCards = useGameStore(s => s.communityCards);
   const gamePhase = useGameStore(s => s.gamePhase);
   const pot = useGameStore(s => s.pot);
@@ -88,9 +92,13 @@ export default function GamePage() {
   const offlineCountdown = useGameStore(s => s.offlineCountdown);
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [borrowing, setBorrowing] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const connected = useGameStore(s => s.connected);
   const serverUrl = useGameStore(s => s.serverUrl);
 
+  // fetching 逻辑：inGame/room 就绪则立即结束；否则 HTTP 拉取（带超时）
+  // 依赖包含 inGame、room，确保 ack 后状态变化时重新检查
   useEffect(() => {
     if (inGame && room) {
       setFetching(false);
@@ -98,10 +106,17 @@ export default function GamePage() {
     }
     if (!roomId || !serverUrl) return;
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+      setFetchTimeout(true);
+    }, 5000);
+
     const httpBase = serverUrl.replace(/\/+$/, '');
-    fetch(`${httpBase}/api/room/${roomId}`)
+    fetch(`${httpBase}/api/room/${roomId}`, { signal: controller.signal })
       .then(r => r.json())
       .then(data => {
+        clearTimeout(timeout);
         const st = useGameStore.getState();
         if (data.room) {
           st.setRoom(data.room as RoomListItem);
@@ -112,9 +127,15 @@ export default function GamePage() {
           }
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        clearTimeout(timeout);
+      })
       .finally(() => setFetching(false));
-  }, [roomId, serverUrl]);
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [roomId, serverUrl, inGame, room]);
 
   useEffect(() => {
     if (!fetching && !inGame && !connected) {
@@ -131,6 +152,59 @@ export default function GamePage() {
     }, 2500);
     return () => clearTimeout(t);
   }, [lastAction]);
+
+  // HTTP 状态轮询兜底：socket 事件可能因网络抖动/静默断开而丢失，
+  // 每 4 秒从后端拉取一次 room 状态，发现 currentPlayerId/phase/pot 不一致就纠正。
+  // 这是"卡在 XX 思考中"的终极兜底——即使 socket 完全失效，HTTP 轮询也能恢复 UI。
+  useEffect(() => {
+    if (!inGame || !roomId || !serverUrl) return;
+    const httpBase = serverUrl.replace(/\/+$/, '');
+    let cancelled = false;
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        const r = await fetch(`${httpBase}/api/room/${roomId}`, { signal: controller.signal });
+        clearTimeout(timeout);
+        const data = await r.json();
+        if (cancelled || !data.room) return;
+        const serverRoom = data.room as RoomListItem;
+        const st = useGameStore.getState();
+        // 同步 room（包含 players、game.pot、game.players 等）
+        st.setRoom(serverRoom);
+        // 关键：同步 currentPlayerId 和 phase（socket turn_changed 丢失时的兜底）
+        if (serverRoom.game) {
+          const serverCurrentPlayerId = (serverRoom.game as any).currentPlayerId
+            || serverRoom.game.players?.[(serverRoom.game as any).currentPlayerIndex]?.playerId;
+          if (serverCurrentPlayerId && serverCurrentPlayerId !== st.currentPlayerId) {
+            console.log('[轮询] 检测到 currentPlayerId 不一致，纠正:', st.currentPlayerId, '→', serverCurrentPlayerId);
+            st.setCurrentPlayerId(serverCurrentPlayerId);
+          }
+          // 关键兜底：轮到自己但 your_turn 事件丢失（没有 turnOptions）→
+          // emit reconnect_player 触发后端 resendStateForPlayer 重新下发回合
+          if (serverCurrentPlayerId === st.playerId && !st.turnOptions && !st.isSpectator) {
+            const ws = getSocket();
+            if (ws?.connected && st.playerId) {
+              console.log('[轮询] 轮到自己但 turnOptions 为空，请求重发回合');
+              ws.emit('reconnect_player', { playerId: st.playerId, roomCode: roomId }, () => {});
+            }
+          }
+          if (serverRoom.game.phase !== st.gamePhase) {
+            console.log('[轮询] 检测到 phase 不一致，纠正:', st.gamePhase, '→', serverRoom.game.phase);
+            st.setGamePhase(serverRoom.game.phase);
+          }
+          st.setPot(serverRoom.game.pot);
+        }
+      } catch {
+        // 网络错误静默忽略，下次重试
+      }
+    };
+
+    const interval = setInterval(poll, 4000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [inGame, roomId, serverUrl]);
 
   const players = room?.players || [];
   const myIndex = players.findIndex(p => p.id === playerId);
@@ -232,13 +306,17 @@ export default function GamePage() {
   const handleBorrow = useCallback((borrow: boolean) => {
     const ws = getSocket();
     if (!ws?.connected || !roomId) return;
+    setBorrowing(true);
     ws.emit('borrow_chips', { roomCode: roomId, borrow }, (res: any) => {
       if (res.success) {
         useGameStore.getState().setBorrowRequest(null);
       } else {
         alert(res.error || '操作失败');
       }
+      setBorrowing(false);
     });
+    // 兜底超时：5s 后自动恢复（防止 ack 丢失卡死）
+    setTimeout(() => setBorrowing(false), 5000);
   }, [getSocket, roomId]);
 
   const phaseLabels: Record<string, string> = {
@@ -247,6 +325,7 @@ export default function GamePage() {
 
   const handleLeave = useCallback(() => {
     const ws = getSocket();
+    setLeaving(true);
     if (ws) ws.emit('leave_room');
     useGameStore.getState().reset();
     navigate('/');
@@ -257,9 +336,13 @@ export default function GamePage() {
       <div className="min-h-screen bg-gradient-to-b from-poker-dark to-poker-felt flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin w-10 h-10 border-2 border-yellow-400 border-t-transparent rounded-full mx-auto mb-4" />
-          <p className="text-gray-400">正在进入游戏...</p>
-          {!connected && !fetching && (
-            <button onClick={() => navigate('/')} className="mt-4 text-yellow-400 underline text-sm">返回首页</button>
+          <p className="text-gray-400">{fetchTimeout ? '进入游戏超时' : '正在进入游戏...'}</p>
+          <p className="text-gray-500 text-xs mt-1">连接: {connected ? '✓' : '✗'} · 房间: {room ? '✓' : '✗'}</p>
+          {(fetchTimeout || !connected) && (
+            <div className="mt-4 flex flex-col gap-2 items-center">
+              <button onClick={() => window.location.reload()} className="text-yellow-400 underline text-sm">刷新重试</button>
+              <button onClick={() => navigate('/')} className="text-gray-400 underline text-xs">返回首页</button>
+            </div>
           )}
         </div>
       </div>
@@ -286,7 +369,10 @@ export default function GamePage() {
     <div className="min-h-screen bg-gradient-to-b from-poker-dark via-poker-felt to-poker-dark overflow-hidden relative">
       {/* 顶部信息栏 */}
       <div className="absolute top-0 left-0 right-0 bg-black/30 backdrop-blur-sm px-3 py-2 flex items-center justify-between z-40">
-        <button onClick={handleLeave} className="text-gray-400 hover:text-white text-sm px-2 py-1">← 离开</button>
+        <button onClick={handleLeave} disabled={leaving} className="text-gray-400 hover:text-white text-sm px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+          {leaving && <span className="animate-spin w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full" />}
+          {leaving ? '离开中...' : '← 离开'}
+        </button>
         <div className="flex items-center gap-2 text-sm">
           <span className="text-gray-400">第 <span className="text-white font-bold">{room?.game?.round || 1}</span> 局</span>
           <span className="text-gray-400">{phaseLabels[gamePhase] || '等待'}</span>
@@ -319,16 +405,7 @@ export default function GamePage() {
 
       {/* 等待其他玩家提示条 */}
       {isWaitingForOthers && !offlineCountdown && (
-        <div className="absolute top-10 left-0 right-0 z-40 flex justify-center pointer-events-none">
-          <div className="bg-black/50 backdrop-blur-sm border border-yellow-500/30 rounded-full px-4 py-1.5 flex items-center gap-2 shadow-lg">
-            <div className="flex gap-1">
-              <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-              <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-              <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-            </div>
-            <span className="text-yellow-300 text-xs font-medium">等待其他玩家行动...</span>
-          </div>
-        </div>
+        <WaitingBanner playerName={currentPlayerName} />
       )}
 
       {/* 离线玩家倒计时提示条：橙色高亮，AI 接管前显示 */}
@@ -410,6 +487,8 @@ export default function GamePage() {
           const isMyTurn = currentPlayerId === player.id;
           const isThinking = isMyTurn && player.id.startsWith('bot_') && !turnOptions;
           const playerOfflineCountdown = offlineCountdown?.playerId === player.id ? offlineCountdown.seconds : null;
+          // 旁观者视角：取该玩家的手牌
+          const spectatorCards = isSpectator ? spectatorHands.find(h => h.playerId === player.id)?.cards : undefined;
           return (
             <div key={player.id} onClick={() => setSelectedPlayer(player)} className="cursor-pointer">
               <PlayerSeat
@@ -423,6 +502,7 @@ export default function GamePage() {
                 isFolded={isPlayerFolded(player.id)}
                 offlineCountdownSeconds={playerOfflineCountdown}
                 position={pos}
+                cards={spectatorCards}
               />
             </div>
           );
@@ -485,7 +565,7 @@ export default function GamePage() {
             >
             <div className="flex gap-1.5 sm:gap-2 min-h-[80px] items-center">
               {myCards.length > 0
-                ? myCards.map((c, i) => <CardView key={i} card={c} highlight />)
+                ? myCards.map((c, i) => <CardView key={i} card={c} highlight dimmed={isPlayerFolded(playerId)} />)
                 : <span className="text-gray-500 text-xs">等待发牌…</span>}
             </div>
             <div
@@ -559,15 +639,19 @@ export default function GamePage() {
             </p>
             <button
               onClick={() => handleBorrow(true)}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-yellow-500 to-yellow-600 text-black font-bold mb-2"
+              disabled={borrowing}
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-yellow-500 to-yellow-600 text-black font-bold mb-2 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              借入筹码
+              {borrowing && <span className="animate-spin w-4 h-4 border-2 border-black border-t-transparent rounded-full" />}
+              {borrowing ? '处理中...' : '借入筹码'}
             </button>
             <button
               onClick={() => handleBorrow(false)}
-              className="w-full py-2 rounded-xl bg-gray-700 text-gray-300 text-sm"
+              disabled={borrowing}
+              className="w-full py-2 rounded-xl bg-gray-700 text-gray-300 text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              不借入（旁观下局）
+              {borrowing && <span className="animate-spin w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full" />}
+              {borrowing ? '处理中...' : '不借入（旁观下局）'}
             </button>
           </div>
         </div>
@@ -586,7 +670,7 @@ export default function GamePage() {
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
 
       {/* 操作栏 */}
-      {inGame && turnOptions && <ActionBar />}
+      {inGame && turnOptions && !isSpectator && <ActionBar />}
       <DanmakuBar />
       {handResult && <HandResultView result={handResult} onClose={() => useGameStore.getState().setHandResult(null)} />}
       {finalSettlement && (

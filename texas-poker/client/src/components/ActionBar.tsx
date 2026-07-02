@@ -30,10 +30,20 @@ export default function ActionBar() {
     setLoading(true);
     setShowRaisePanel(false);
 
+    // 安全超时：8s 后强制恢复，避免 ack 丢失导致永远 loading
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 8000);
+
     ws.emit('player_action', { action, amount: amount || 0 }, (res: any) => {
+      clearTimeout(safetyTimer);
       setLoading(false);
       if (!res.success) {
         alert(res.error || '操作失败');
+      } else {
+        // ack 成功 = 操作已处理，轮次已结束，立即清除自己的 turnOptions
+        // 不能等 turn_changed 事件（如果事件丢失会一直显示"操作中"）
+        useGameStore.getState().setTurnOptions(null);
       }
     });
   };
@@ -147,10 +157,7 @@ export default function ActionBar() {
       {loading && (
         <div className="absolute inset-0 bg-gray-900/60 flex items-center justify-center z-10 rounded-t-xl">
           <div className="flex items-center gap-2 text-yellow-400">
-            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
+            <span className="animate-spin w-5 h-5 border-2 border-yellow-400 border-t-transparent rounded-full" />
             <span className="text-sm font-bold">操作中...</span>
           </div>
         </div>
