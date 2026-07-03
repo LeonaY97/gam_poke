@@ -73,7 +73,8 @@ body {
   }
 }
 
-/* 弹幕飞行动画（响应式：由 DanmakuBar 内联 style 指定 duration） */
+/* 弹幕飞行动画（响应式：由 DanmakuBar 内联 style 指定 duration）
+   手机端使用 translateX(100%) 相对父容器，比 100vw 更省 GPU */
 @keyframes danmakuFlyResponsive {
   0% {
     opacity: 0;
@@ -88,6 +89,26 @@ body {
   100% {
     opacity: 0;
     transform: translateX(-100vw);
+  }
+}
+
+/* 手机端弹幕动画（更轻量，使用 percentage 而非 vw） */
+@media (max-width: 767px) {
+  @keyframes danmakuFlyResponsive {
+    0% {
+      opacity: 0;
+      transform: translateX(100%);
+    }
+    4% {
+      opacity: 1;
+    }
+    96% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+      transform: translateX(-100%);
+    }
   }
 }
 
@@ -127,9 +148,16 @@ body {
   }
 }
 
-/* 当前行动玩家呼吸光效 */
+/* 当前行动玩家呼吸光效（手机端禁用动画，仅静态光晕，减少 GPU 压力） */
 .turn-glow {
-  animation: turnGlow 1.5s ease-in-out infinite;
+  box-shadow: 0 0 8px 2px rgba(250, 204, 21, 0.5);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  /* 仅桌面端启用动画 */
+  .turn-glow {
+    animation: turnGlow 1.5s ease-in-out infinite;
+  }
 }
 
 @keyframes turnGlow {

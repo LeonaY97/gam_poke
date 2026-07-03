@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type { Player, Card } from '../types/game';
 import CardView from './CardView';
 
@@ -23,7 +23,7 @@ interface PlayerSeatProps {
   cards?: Card[];
 }
 
-export default function PlayerSeat({
+function PlayerSeat({
   player,
   isCurrentPlayer,
   isDealer,
@@ -114,9 +114,9 @@ export default function PlayerSeat({
         </div>
       )}
 
-      {/* 行动中/思考中标识（右上角脉冲点） */}
+      {/* 行动中/思考中标识（右上角脉冲点，手机端静态） */}
       {(isActiveTurn || isThinking) && !isFolded && (
-        <div className={`absolute -top-2 -right-2 w-3 h-3 rounded-full animate-ping ${isThinking ? 'bg-blue-400' : 'bg-yellow-400'}`} />
+        <div className={`absolute -top-2 -right-2 w-3 h-3 rounded-full md:animate-ping ${isThinking ? 'bg-blue-400' : 'bg-yellow-400'}`} />
       )}
 
       <div className="w-7 h-7 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-gray-500 to-gray-700 flex items-center justify-center text-white font-bold text-[10px] sm:text-sm mb-0.5">
@@ -127,7 +127,7 @@ export default function PlayerSeat({
         {player.nickname}
       </span>
 
-      <span key={player.chips} className={`font-bold text-[10px] sm:text-sm ${isFolded ? 'text-gray-500' : 'text-yellow-400 chips-change'}`}>
+      <span className={`font-bold text-[10px] sm:text-sm ${isFolded ? 'text-gray-500' : 'text-yellow-400'}`}>
         {player.chips}
       </span>
 
@@ -153,3 +153,42 @@ export default function PlayerSeat({
     </div>
   );
 }
+
+// memo 包装：props 不变时不重渲染（GamePage 18 个 store 订阅任一变化都会重渲染，memo 避免无变化座位跟着重建）
+// 自定义 areEqual：因为 GamePage 中 seatMap 是 {...p, seatIndex, posIndex} 创建的新对象，
+// 默认浅比较 player 引用每次都变，memo 会失效。这里按字段值比较。
+function areEqual(prev: PlayerSeatProps, next: PlayerSeatProps) {
+  // player 字段（仅比较影响渲染的字段）
+  const p1 = prev.player;
+  const p2 = next.player;
+  if (p1.id !== p2.id) return false;
+  if (p1.nickname !== p2.nickname) return false;
+  if (p1.chips !== p2.chips) return false;
+  if (p1.isConnected !== p2.isConnected) return false;
+
+  // 其他 props 基本类型直接比较
+  if (prev.isCurrentPlayer !== next.isCurrentPlayer) return false;
+  if (prev.isDealer !== next.isDealer) return false;
+  if (prev.positionLabel !== next.positionLabel) return false;
+  if (prev.isActiveTurn !== next.isActiveTurn) return false;
+  if (prev.isThinking !== next.isThinking) return false;
+  if (prev.currentBet !== next.currentBet) return false;
+  if (prev.isFolded !== next.isFolded) return false;
+  if (prev.offlineCountdownSeconds !== next.offlineCountdownSeconds) return false;
+
+  // position 对象：每次都是新引用，但值不变即相等
+  if (prev.position.x !== next.position.x || prev.position.y !== next.position.y) return false;
+
+  // cards 数组：引用相同或长度相同且内容相同才相等
+  const c1 = prev.cards;
+  const c2 = next.cards;
+  if (c1 === c2) return true;
+  if (!c1 || !c2) return false;
+  if (c1.length !== c2.length) return false;
+  for (let i = 0; i < c1.length; i++) {
+    if (c1[i].rank !== c2[i].rank || c1[i].suit !== c2[i].suit) return false;
+  }
+  return true;
+}
+
+export default memo(PlayerSeat, areEqual);

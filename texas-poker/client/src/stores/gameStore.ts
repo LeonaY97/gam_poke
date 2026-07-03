@@ -66,6 +66,23 @@ interface GameState {
   setFinalSettlement: (data: FinalSettlementData | null) => void;
   addDanmaku: (danmaku: { nickname: string; text: string; color: string; isSpectator?: boolean }) => void;
   removeDanmaku: (id: number) => void;
+
+  /**
+   * 细粒度更新单玩家筹码：避免 action_result 时全量 setRoom 引发整树重渲染。
+   * 仅修改 room.players 中对应玩家的 chips 字段，保持其他玩家对象引用不变。
+   */
+  updatePlayerChips: (playerId: string, chips: number) => void;
+  /**
+   * 细粒度更新游戏状态：仅修改 room.game 的部分字段，保持 room 引用尽量不变。
+   * 传入 patch 对象，会被浅合并到 room.game。
+   */
+  updateGameState: (patch: {
+    pot?: number;
+    gamePlayers?: any[];
+    betHistory?: any[];
+    phase?: GamePhase;
+  }) => void;
+
   reset: () => void;
 }
 
@@ -138,6 +155,37 @@ export const useGameStore = create<GameState>((set, get) => ({
     }, 40000);
   },
   removeDanmaku: (id) => set((state) => ({ danmakus: state.danmakus.filter(d => d.id !== id) })),
+
+  // 细粒度更新单玩家筹码：仅替换命中玩家的对象，其他玩家引用保持不变
+  // 这样 PlayerSeat 的 areEqual 才能识别"我没变"并跳过重渲染
+  updatePlayerChips: (playerId, chips) => set((state) => {
+    if (!state.room) return {};
+    let changed = false;
+    const newPlayers = state.room.players.map(p => {
+      if (p.id === playerId) {
+        if (p.chips !== chips) changed = true;
+        return { ...p, chips };
+      }
+      return p;
+    });
+    if (!changed) return {};
+    return { room: { ...state.room, players: newPlayers } };
+  }),
+
+  // 细粒度更新游戏状态：仅修改指定字段，其他字段保持引用不变
+  updateGameState: (patch) => set((state) => {
+    if (!state.room || !state.room.game) return {};
+    const oldGame = state.room.game;
+    const newGame = { ...oldGame };
+    let changed = false;
+    if (patch.pot !== undefined && patch.pot !== oldGame.pot) { newGame.pot = patch.pot; changed = true; }
+    if (patch.gamePlayers !== undefined) { newGame.players = patch.gamePlayers; changed = true; }
+    if (patch.betHistory !== undefined) { newGame.betHistory = patch.betHistory; changed = true; }
+    if (patch.phase !== undefined && patch.phase !== oldGame.phase) { newGame.phase = patch.phase; changed = true; }
+    if (!changed) return {};
+    return { room: { ...state.room, game: newGame } };
+  }),
+
   reset: () => {
     localStorage.removeItem('poker_player_id');
     localStorage.removeItem('poker_room_code');

@@ -12,13 +12,25 @@ export default function DanmakuBar() {
   // 根据屏幕宽度计算弹幕飞行时长（秒）
   // 手机窄（<640px）→ 18s 较快；电脑宽（≥1280px）→ 36s 较慢，看得清楚
   const [duration, setDuration] = useState(24);
+  // 手机端：限制并发弹幕数（手机 GPU 合成 9 条 translateX 持续动画压力较大）
+  // 手机显示最近 3 条，平板 5 条，桌面端保留 9 条
+  const [maxConcurrent, setMaxConcurrent] = useState(9);
   useEffect(() => {
     const calc = () => {
       const w = window.innerWidth;
-      if (w < 640) setDuration(18);
-      else if (w < 1024) setDuration(24);
-      else if (w < 1440) setDuration(30);
-      else setDuration(36);
+      if (w < 640) {
+        setDuration(18);
+        setMaxConcurrent(3);
+      } else if (w < 1024) {
+        setDuration(24);
+        setMaxConcurrent(5);
+      } else if (w < 1440) {
+        setDuration(30);
+        setMaxConcurrent(7);
+      } else {
+        setDuration(36);
+        setMaxConcurrent(9);
+      }
     };
     calc();
     window.addEventListener('resize', calc);
@@ -29,6 +41,9 @@ export default function DanmakuBar() {
   useEffect(() => {
     if (showInput) inputRef.current?.focus();
   }, [showInput]);
+
+  // 按设备能力截取最近的弹幕：手机端只显示最近 3 条，避免满载 9 条并发动画
+  const visibleDanmakus = danmakus.slice(-maxConcurrent);
 
   const handleSend = () => {
     const text = input.trim();
@@ -43,7 +58,7 @@ export default function DanmakuBar() {
     <>
       {/* 弹幕轨道容器：绝对定位，不占据布局空间 */}
       <div className="fixed top-12 left-0 right-0 z-30 pointer-events-none overflow-hidden" style={{ height: '40vh' }}>
-        {danmakus.map((d, i) => {
+        {visibleDanmakus.map((d, i) => {
           // 多条弹幕按索引错开轨道，避免重叠
           const track = (i % 4) * 3; // 0rem, 3rem, 6rem, 9rem
           return (
@@ -79,7 +94,7 @@ export default function DanmakuBar() {
       {/* 弹幕输入框 */}
       {showInput && (
         <div className="fixed bottom-28 left-3 right-14 z-40 slide-up">
-          <div className="flex items-center gap-2 bg-gray-800/95 backdrop-blur rounded-full px-3 py-2 border border-gray-600">
+          <div className="flex items-center gap-2 bg-gray-800/95 md:backdrop-blur rounded-full px-3 py-2 border border-gray-600">
             <input
               ref={inputRef}
               type="text"

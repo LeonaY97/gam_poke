@@ -678,13 +678,38 @@ export class GameController {
     const activePlayers = this.game.players.filter(p => !p.isFolded && !p.isAllIn);
 
     // 只剩一人未弃牌 → 直接结算
-    if (activePlayers.length <= 1) {
+    if (activePlayers.length === 0) {
       const notFolded = this.game.players.filter(p => !p.isFolded);
       if (notFolded.length === 1) {
         this.endGameWithSingleWinner(notFolded[0]);
         return;
       }
+      // 所有人都 all-in 或弃牌，没有可行动玩家，推进到下一阶段
       this.endBettingRound();
+      return;
+    }
+
+    // 仅剩 1 个 active 玩家时，不能直接结束本轮：
+    //   - 若还有其他未弃牌玩家（all-in），该 active 玩家可能需要决定 call/fold 来匹配最高下注
+    //   - 仅当该玩家已匹配最高下注且本轮已主动行动过，才可结束本轮
+    if (activePlayers.length === 1) {
+      const notFolded = this.game.players.filter(p => !p.isFolded);
+      if (notFolded.length === 1) {
+        this.endGameWithSingleWinner(notFolded[0]);
+        return;
+      }
+      const onlyActive = activePlayers[0];
+      const highestBet = Math.max(...this.game.players.map(p => p.totalBet));
+      const matched = onlyActive.totalBet === highestBet || onlyActive.isAllIn;
+      const acted = this.hasPlayerActedInRound(onlyActive.playerId);
+      if (matched && acted) {
+        this.endBettingRound();
+        return;
+      }
+      // 该玩家还需要行动：把行动权交给他
+      this.game.currentPlayerIndex = this.game.players.indexOf(onlyActive);
+      this.sendTurnToPlayer(onlyActive);
+      this.broadcastSpectatorHands();
       return;
     }
 
@@ -769,102 +794,159 @@ export class GameController {
   private doShowdown(): void {
     this.game.phase = 'showdown';
 
-    const activePlayers = this.game.players.filter(p => !p.isFolded);
-    const results = compareHands(
-      activePlayers.map(gp => ({
-        playerId: gp.playerId,
-        hand: gp.hand,
-        communityCards: this.game.communityCards,
-      }))
-    );
-
-    // 按手牌强度从强到弱排序
-    const sortedResults = [...results].sort((a, b) =>
-      this.getHandNumericValue(b.bestCards) - this.getHandNumericValue(a.bestCards)
-    );
-
-    // 按 side pot 分层分配奖金
-    // 没有人 all-in 时 sidePots 为空，用主池整体
-    const sidePots = this.game.sidePots.length > 0
-      ? this.game.sidePots
-      : [{ amount: this.game.pot, eligiblePlayers: activePlayers.map(p => p.playerId) }];
-
-    const winnings = new Map<string, number>();
-    // 记录每层是否有多个赢家平分（真平局）
-    let anyLayerSplit = false;
-    // 记录总赢家来自多少个不同 side pot 层
-    const winnerLayerCount = new Map<string, number>();
-    let totalLayers = 0;
-
-    for (const sp of sidePots) {
-      // 该层 eligible 中手牌最强的
-      const eligibleResults = sortedResults.filter(r => sp.eligiblePlayers.includes(r.playerId));
-      if (eligibleResults.length === 0) continue;
-
-      totalLayers++;
-      const topVal = this.getHandNumericValue(eligibleResults[0].bestCards);
-      const layerWinners = eligibleResults.filter(r =>
-        this.getHandNumericValue(r.bestCards) === topVal
+    let handResult: HandResult;
+    try {
+      const activePlayers = this.game.players.filter(p => !p.isFolded);
+      const results = compareHands(
+        activePlayers.map(gp => ({
+          playerId: gp.playerId,
+          hand: gp.hand,
+          communityCards: this.game.communityCards,
+        }))
       );
 
-      // 同一层有多个赢家 = 真平局
-      if (layerWinners.length > 1) anyLayerSplit = true;
+      // 按手牌强度从强到弱排序
+      const sortedResults = [...results].sort((a, b) =>
+        this.getHandNumericValue(b.bestCards) - this.getHandNumericValue(a.bestCards)
+      );
 
-      const chipsPerWinner = Math.floor(sp.amount / layerWinners.length);
-      for (const w of layerWinners) {
-        winnings.set(w.playerId, (winnings.get(w.playerId) || 0) + chipsPerWinner);
-        winnerLayerCount.set(w.playerId, (winnerLayerCount.get(w.playerId) || 0) + 1);
+      // 按 side pot 分层分配奖金
+      // 没有人 all-in 时 sidePots 为空，用主池整体
+      const sidePots = this.game.sidePots.length > 0
+        ? this.game.sidePots
+        : [{ amount: this.game.pot, eligiblePlayers: activePlayers.map(p => p.playerId) }];
+
+      const winnings = new Map<string, number>();
+      // 记录每层是否有多个赢家平分（真平局）
+      let anyLayerSplit = false;
+      // 记录总赢家来自多少个不同 side pot 层
+      const winnerLayerCount = new Map<string, number>();
+      let totalLayers = 0;
+
+      for (const sp of sidePots) {
+        // 该层 eligible 中手牌最强的
+        const eligibleResults = sortedResults.filter(r => sp.eligiblePlayers.includes(r.playerId));
+        if (eligibleResults.length === 0) {
+          // 没有合格赢家（理论上不应发生）：把该层筹码按贡献比例退回给所有参与此层的玩家
+          // 避免 continue 导致筹码永久流失
+          this.refundSidePotToContributors(sp);
+          continue;
+        }
+
+        totalLayers++;
+        const topVal = this.getHandNumericValue(eligibleResults[0].bestCards);
+        const layerWinners = eligibleResults.filter(r =>
+          this.getHandNumericValue(r.bestCards) === topVal
+        );
+
+        // 同一层有多个赢家 = 真平局
+        if (layerWinners.length > 1) anyLayerSplit = true;
+
+        // 修复 Math.floor 截断：余数依次分给前几位赢家，避免筹码永久流失
+        const baseShare = Math.floor(sp.amount / layerWinners.length);
+        const remainder = sp.amount - baseShare * layerWinners.length;
+        layerWinners.forEach((w, idx) => {
+          const extra = idx < remainder ? 1 : 0;
+          winnings.set(w.playerId, (winnings.get(w.playerId) || 0) + baseShare + extra);
+          winnerLayerCount.set(w.playerId, (winnerLayerCount.get(w.playerId) || 0) + 1);
+        });
       }
+
+      // 判断是否真平局：
+      // - anyLayerSplit=true：某层多家平分 → 真平局
+      // - 多个赢家但都来自同一层（totalLayers=1 且多家）→ 真平局
+      // - 多个赢家来自不同层（totalLayers>1 且没平分）→ 多人分池，非平局
+      const winnerCount = winnings.size;
+      const isSplitPot = winnerCount > 1 && (anyLayerSplit || totalLayers === 1);
+
+      handResult = {
+        isSplitPot,
+        winners: Array.from(winnings.entries()).map(([playerId, chipsWon]) => {
+          const r = results.find(res => res.playerId === playerId);
+          const player = this.getPlayer(playerId);
+          if (player) player.chips += chipsWon;
+          return {
+            playerId,
+            nickname: player?.nickname || 'Unknown',
+            handDescription: r?.handDescription || '未知牌型',
+            handRank: r?.handRank || 0,
+            chipsWon,
+            cards: r?.bestCards || [],
+          };
+        }),
+        allHands: activePlayers.map(gp => {
+          const best = getBestHand(gp.hand, this.game.communityCards);
+          const player = this.getPlayer(gp.playerId);
+          return {
+            playerId: gp.playerId,
+            nickname: player?.nickname || 'Unknown',
+            handDescription: best.handDescription,
+            handRank: best.handRank,
+            cards: gp.hand,
+            isFolded: gp.isFolded,
+          };
+        }),
+      };
+    } catch (err) {
+      // doShowdown 异常兜底：避免异常导致 recordHandHistory 未被调用、游戏卡死
+      console.error('[doShowdown] 异常:', err);
+      handResult = {
+        winners: [],
+        allHands: this.game.players.map(gp => {
+          const player = this.getPlayer(gp.playerId);
+          return {
+            playerId: gp.playerId,
+            nickname: player?.nickname || 'Unknown',
+            handDescription: '错误',
+            handRank: 0,
+            cards: gp.hand,
+            isFolded: gp.isFolded,
+          };
+        }),
+      };
     }
 
-    // 判断是否真平局：
-    // - anyLayerSplit=true：某层多家平分 → 真平局
-    // - 多个赢家但都来自同一层（totalLayers=1 且多家）→ 真平局
-    // - 多个赢家来自不同层（totalLayers>1 且没平分）→ 多人分池，非平局
-    const winnerCount = winnings.size;
-    const isSplitPot = winnerCount > 1 && (anyLayerSplit || totalLayers === 1);
-
-    const handResult: HandResult = {
-      isSplitPot,
-      winners: Array.from(winnings.entries()).map(([playerId, chipsWon]) => {
-        const r = results.find(res => res.playerId === playerId)!;
-        const player = this.getPlayer(playerId);
-        if (player) player.chips += chipsWon;
-        return {
-          playerId,
-          nickname: player?.nickname || 'Unknown',
-          handDescription: r.handDescription,
-          handRank: r.handRank,
-          chipsWon,
-          cards: r.bestCards,
-        };
-      }),
-      allHands: activePlayers.map(gp => {
-        const best = getBestHand(gp.hand, this.game.communityCards);
-        const player = this.getPlayer(gp.playerId);
-        return {
-          playerId: gp.playerId,
-          nickname: player?.nickname || 'Unknown',
-          handDescription: best.handDescription,
-          handRank: best.handRank,
-          cards: gp.hand,
-          isFolded: gp.isFolded,
-        };
-      }),
-    };
-
     this.lastHandResult = handResult;
-    this.broadcastFn('hand_result', handResult);
     this.room.game = this.game;
 
-    // 记录本局历史
-    this.recordHandHistory(handResult);
+    // 修复：先记录历史，再广播——避免广播异常导致历史丢失
+    try {
+      this.recordHandHistory(handResult);
+    } catch (err) {
+      console.error('[doShowdown] recordHandHistory 异常:', err);
+    }
+
+    try {
+      this.broadcastFn('hand_result', handResult);
+    } catch (err) {
+      console.error('[doShowdown] broadcastFn hand_result 异常:', err);
+    }
 
     // 筹码归零的玩家：AI自动借入，真人发 borrow_request 等待决策
     this.collectBrokePlayersAndProceed();
 
     // 等待所有真人玩家关闭结算画面后进入下一局
     this.waitForHandResultAcks();
+  }
+
+  /**
+   * 当某个 side pot 层没有合格赢家时，把该层筹码按贡献比例退回给所有参与此层的玩家。
+   * 这是兜底逻辑，正常情况下不应被触发。
+   */
+  private refundSidePotToContributors(sp: SidePot): void {
+    // 通过当前玩家的 totalBet 推断谁对此层有贡献
+    // 由于此函数是兜底，仅做简单处理：按未弃牌玩家均分
+    const eligible = sp.eligiblePlayers;
+    if (eligible.length === 0) return;
+    const share = Math.floor(sp.amount / eligible.length);
+    const remainder = sp.amount - share * eligible.length;
+    eligible.forEach((pid, idx) => {
+      const player = this.getPlayer(pid);
+      if (player) {
+        player.chips += share + (idx < remainder ? 1 : 0);
+      }
+    });
+    console.warn(`[sidePot] 兜底退款：层金额 ${sp.amount} 退回给 ${eligible.length} 个玩家`);
   }
 
   private endGameWithSingleWinner(gp: GamePlayer): void {
@@ -927,11 +1009,20 @@ export class GameController {
     };
 
     this.lastHandResult = handResult;
-    this.broadcastFn('hand_result', handResult);
     this.room.game = this.game;
 
-    // 记录本局历史
-    this.recordHandHistory(handResult);
+    // 修复：先记录历史，再广播——避免广播异常导致历史丢失
+    try {
+      this.recordHandHistory(handResult);
+    } catch (err) {
+      console.error('[endGameWithSingleWinner] recordHandHistory 异常:', err);
+    }
+
+    try {
+      this.broadcastFn('hand_result', handResult);
+    } catch (err) {
+      console.error('[endGameWithSingleWinner] broadcastFn hand_result 异常:', err);
+    }
 
     // 筹码归零的玩家：AI自动借入，真人发 borrow_request 等待决策
     this.collectBrokePlayersAndProceed();

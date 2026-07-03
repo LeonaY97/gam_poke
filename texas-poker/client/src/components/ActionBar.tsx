@@ -6,7 +6,9 @@ import type { PlayerAction } from '../types/game';
 export default function ActionBar() {
   const turnOptions = useGameStore(s => s.turnOptions);
   const countdown = useGameStore(s => s.countdown);
-  const room = useGameStore(s => s.room);
+  // 性能优化：只订阅 bigBlind（settings 几乎不变），避免订阅整个 room
+  // 之前订阅 room，每次玩家行动 room 引用都变 → ActionBar 重渲染
+  const bigBlindFromSettings = useGameStore(s => s.room?.settings?.bigBlind ?? 20);
   const [raiseAmount, setRaiseAmount] = useState(0);
   const [showRaisePanel, setShowRaisePanel] = useState(false);
   const [customInput, setCustomInput] = useState('');
@@ -21,19 +23,38 @@ export default function ActionBar() {
     }
   }, [showRaisePanel, turnOptions]);
 
+  // 关键：turnOptions 被清空时（轮询/事件/超时），必须清除 loading
+  // 否则会永远卡在"操作中..."
+  useEffect(() => {
+    if (!turnOptions && loading) {
+      setLoading(false);
+    }
+  }, [turnOptions, loading]);
+
   if (!turnOptions) return null;
 
   const handleAction = (action: PlayerAction, amount?: number) => {
     const ws = getSocket();
-    if (!ws) return;
+    if (!ws) {
+      alert('连接未建立，请刷新页面');
+      return;
+    }
+    // 关键：socket 未连接时 emit 的 ack 永远不会调用，必须先检查
+    if (!ws.connected) {
+      alert('网络未连接，正在重连...请稍后重试');
+      try { ws.connect(); } catch {}
+      return;
+    }
 
     setLoading(true);
     setShowRaisePanel(false);
 
-    // 安全超时：8s 后强制恢复，避免 ack 丢失导致永远 loading
+    // 安全超时：3s 后强制恢复（手机用户等不了太久）
     const safetyTimer = setTimeout(() => {
       setLoading(false);
-    }, 8000);
+      // 超时后主动拉取一次状态，纠正可能的 UI 不一致
+      console.warn('[ActionBar] 操作 3s 未响应，强制清除 loading');
+    }, 3000);
 
     ws.emit('player_action', { action, amount: amount || 0 }, (res: any) => {
       clearTimeout(safetyTimer);
@@ -42,7 +63,6 @@ export default function ActionBar() {
         alert(res.error || '操作失败');
       } else {
         // ack 成功 = 操作已处理，轮次已结束，立即清除自己的 turnOptions
-        // 不能等 turn_changed 事件（如果事件丢失会一直显示"操作中"）
         useGameStore.getState().setTurnOptions(null);
       }
     });
@@ -51,7 +71,7 @@ export default function ActionBar() {
   const minRaise = turnOptions.minRaise || 0;
   const maxRaise = turnOptions.maxRaise || 0;
   // 大盲从房间设置读取（真实值），不再用 minRaise 推断（无人下注时 minRaise=1 不代表大盲）
-  const bigBlind = room?.settings?.bigBlind || 20;
+  const bigBlind = bigBlindFromSettings;
 
   // 生成整数档次快捷按钮：基于大盲的倍数
   const quickAmounts = (() => {

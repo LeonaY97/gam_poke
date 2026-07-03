@@ -6,11 +6,33 @@ import type { HandResult, TurnOptions, GamePhase, Card, RoomListItem, FinalSettl
 
 let socket: Socket | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
+let visibilityHandlerRegistered = false;
+
+/** 注册一次 visibilitychange 监听器：手机切回前台时主动重连 socket */
+function ensureVisibilityHandler() {
+  if (visibilityHandlerRegistered) return;
+  visibilityHandlerRegistered = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    const st = useGameStore.getState();
+    if (!socket || !st.playerId) return;
+    // socket 断开时主动重连
+    if (!socket.connected) {
+      console.log('[visibility] 切回前台，socket 断开，主动重连');
+      try { socket.connect(); } catch {}
+    }
+    // 无论 socket 是否连接，切回前台时都标记需要立即轮询一次（由 GamePage 轮询 useEffect 处理）
+    // 通过设置一个标志，让轮询逻辑立即执行
+    (window as any).__pendingPoll = true;
+  });
+}
 
 export function useSocket() {
   const getSocket = useCallback((): Socket | null => socket, []);
 
   const connect = useCallback((serverUrl: string) => {
+    // 注册手机切回前台的 visibilitychange 监听器（只注册一次）
+    ensureVisibilityHandler();
     // 防止重复连接：如果 socket 已存在且正在连接/已连接到同一服务器，跳过
     if (socket) {
       if (socket.connected) return socket;
@@ -49,6 +71,10 @@ export function useSocket() {
           localStorage.removeItem('poker_player_id');
           localStorage.removeItem('poker_room_code');
           useGameStore.getState().reset();
+          // 跳回首页，避免卡在 /room/xxx 路由
+          if (window.location.pathname !== '/') {
+            window.location.href = '/';
+          }
         }, 5000);
         socket!.emit('reconnect_player', { playerId, roomCode: room.id }, (res: any) => {
           clearTimeout(reconnectTimeout);
@@ -61,10 +87,13 @@ export function useSocket() {
               useGameStore.getState().setGamePhase(res.room.game.phase);
             }
           } else {
-            // 重连失败（房间已解散或玩家被清理），清掉持久化数据
+            // 重连失败（房间已解散或玩家被清理），清掉持久化数据并跳回首页
             localStorage.removeItem('poker_player_id');
             localStorage.removeItem('poker_room_code');
             useGameStore.getState().reset();
+            if (window.location.pathname !== '/') {
+              window.location.href = '/';
+            }
           }
         });
       }
@@ -114,34 +143,10 @@ export function useSocket() {
       st.setCurrentPlayerId(null);
       st.setBorrowRequest(null);
       st.setFinalSettlement(null);
-      // 重置 room.game 为新一局，清空上一手的 betHistory / players 等
-      const r = st.room;
-      if (r) {
-        st.setRoom({
-          ...r,
-          game: {
-            id: `game_${Date.now()}`,
-            round: 1,
-            phase: 'preflop',
-            deck: [],
-            communityCards: [],
-            pot: 0,
-            sidePots: [],
-            dealerIndex: data.dealerPos ?? 0,
-            currentPlayerIndex: 0,
-            players: (data.seats || []).map((p: any) => ({
-              playerId: p.id,
-              hand: [],
-              currentBet: 0,
-              totalBet: 0,
-              isFolded: false,
-              isAllIn: false,
-              isActive: true,
-            })),
-            betHistory: [],
-          } as any,
-        });
-      }
+      // 不调用 setRoom——服务端在 startGame 后立即广播 room_updated（含完整 room.game），
+      // 双重 setRoom 会导致手机端 800+ 行 GamePage 短时间内重渲染两次。
+      // room_updated 会带来重排后的 players 和完整 game 状态。
+      // 如果 room_updated 丢失，6s 轮询会兜底拉取。
     });
 
     socket.on('borrow_request', (data: { playerId: string; borrowCount: number; initialChips: number }) => {
@@ -210,17 +215,15 @@ export function useSocket() {
         st.setCountdown(0);
         if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
       }
-      const r = st.room;
-      if (r) {
-        const updatedPlayers = r.players.map(p => p.id === data.playerId ? { ...p, chips: data.chips } : p);
-        const updatedGame = r.game ? {
-          ...r.game,
-          pot: data.pot,
-          players: data.gamePlayers || r.game.players,
-          betHistory: data.betHistory || r.game.betHistory,
-        } : r.game;
-        st.setRoom({ ...r, players: updatedPlayers, game: updatedGame });
-      }
+      // 性能优化：用细粒度 setter 替代全量 setRoom
+      // 之前：st.setRoom({...r, players: updatedPlayers, game: updatedGame}) 会触发整树重渲染
+      // 现在：仅修改筹码和游戏状态，未变玩家的对象引用保持不变，PlayerSeat memo 才能跳过
+      st.updatePlayerChips(data.playerId, data.chips);
+      st.updateGameState({
+        pot: data.pot,
+        gamePlayers: data.gamePlayers,
+        betHistory: data.betHistory,
+      });
     });
 
     socket.on('pot_updated', (data: { pot: number }) => {

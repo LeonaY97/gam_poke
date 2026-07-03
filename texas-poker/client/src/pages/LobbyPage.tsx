@@ -19,24 +19,35 @@ export default function LobbyPage() {
   const [starting, setStarting] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [kickingId, setKickingId] = useState<string | null>(null);
+  const [fetchFailed, setFetchFailed] = useState(false);
 
   // 房主重进：如果 store 里有 room 且 id 匹配，直接用，不重新 fetch
   useEffect(() => {
     if (room && room.id === roomId) {
       setFetching(false);
+      setFetchFailed(false);
       return;
     }
 
     // 兜底：通过 HTTP 拉取房间数据（App 已处理重连，这里只在 store 为空时兜底）
     if (!roomId || !serverUrl) {
       setFetching(false);
+      setFetchFailed(true);
       return;
     }
 
+    setFetching(true);
+    setFetchFailed(false);
+    let cancelled = false;
     const httpBase = serverUrl.replace(/\/+$/, '');
-    fetch(`${httpBase}/api/room/${roomId}`)
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    fetch(`${httpBase}/api/room/${roomId}`, { signal: controller.signal })
       .then(r => r.json())
       .then(data => {
+        clearTimeout(timeout);
+        if (cancelled) return;
         if (data.room) {
           const st = useGameStore.getState();
           st.setRoom(data.room as RoomListItem);
@@ -47,11 +58,58 @@ export default function LobbyPage() {
             st.setPot(data.room.game.pot);
             navigate(`/room/${roomId}/game`);
           }
+        } else {
+          // 房间不存在
+          setFetchFailed(true);
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        clearTimeout(timeout);
+        if (cancelled) return;
+        setFetchFailed(true);
+      })
+      .finally(() => {
+        if (!cancelled) setFetching(false);
+      });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [roomId, serverUrl, navigate]);
+
+  // 手动重试拉取
+  const handleRetryFetch = useCallback(() => {
+    setFetchFailed(false);
+    setFetching(true);
+    const st = useGameStore.getState();
+    const httpBase = (st.serverUrl || '').replace(/\/+$/, '');
+    if (!httpBase || !roomId) {
+      setFetching(false);
+      setFetchFailed(true);
+      return;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    fetch(`${httpBase}/api/room/${roomId}`, { signal: controller.signal })
+      .then(r => r.json())
+      .then(data => {
+        clearTimeout(timeout);
+        if (data.room) {
+          st.setRoom(data.room as RoomListItem);
+          if (data.room.game && data.room.game.phase !== 'waiting') {
+            st.setInGame(true);
+            st.setGamePhase(data.room.game.phase);
+            st.setPot(data.room.game.pot);
+            navigate(`/room/${roomId}/game`);
+          }
+        } else {
+          setFetchFailed(true);
+        }
+      })
+      .catch(() => setFetchFailed(true))
       .finally(() => setFetching(false));
-  }, [roomId, serverUrl]);
+  }, [roomId, navigate]);
 
   useEffect(() => {
     if (inGame && room) {
@@ -68,19 +126,39 @@ export default function LobbyPage() {
     }
     setStarting(true);
     console.log('[start_game] emit, roomCode=', room.id);
-    // 5s 兜底超时：ack 没返回时恢复按钮并尝试进入游戏
+    // 15s 兜底超时：手机网络慢/服务端初始化 AI 较慢时给充足时间
     const safety = setTimeout(() => {
-      console.warn('[start_game] ack 5s 超时');
+      console.warn('[start_game] ack 15s 超时，主动 HTTP 拉取确认');
       setStarting(false);
-      // 后端可能已开始，只是 ack 丢失：检查 room.game.phase
-      const st = useGameStore.getState();
-      if (st.room && st.room.game && st.room.game.phase !== 'waiting') {
-        st.setInGame(true);
-        navigate(`/room/${room.id}/game`);
-      } else {
+      // 后端可能已开始，只是 ack 丢失：主动 HTTP 拉取房间状态
+      const httpBase = (useGameStore.getState().serverUrl || '').replace(/\/+$/, '');
+      if (!httpBase) {
         alert('开始游戏超时，请重试或刷新页面');
+        return;
       }
-    }, 5000);
+      // 兜底 fetch 必须加超时，否则弱网下会无限期挂起
+      const fetchController = new AbortController();
+      const fetchTimeout = setTimeout(() => fetchController.abort(), 8000);
+      fetch(`${httpBase}/api/room/${room.id}`, { signal: fetchController.signal })
+        .then(r => r.json())
+        .then(data => {
+          if (data.room && data.room.game && data.room.game.phase !== 'waiting') {
+            const st = useGameStore.getState();
+            st.setRoom(data.room);
+            st.setInGame(true);
+            st.setGamePhase(data.room.game.phase);
+            st.setPot(data.room.game.pot);
+            navigate(`/room/${room.id}/game`);
+          } else {
+            // HTTP 确认游戏真的没开始，提示用户
+            alert('开始游戏超时，请重试或刷新页面');
+          }
+        })
+        .catch(() => {
+          alert('开始游戏超时，网络异常，请检查网络后重试');
+        })
+        .finally(() => clearTimeout(fetchTimeout));
+    }, 15000);
     ws.emit('start_game', { roomCode: room.id }, (res: any) => {
       clearTimeout(safety);
       console.log('[start_game] ack:', res);
@@ -119,11 +197,24 @@ export default function LobbyPage() {
     return (
       <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin w-10 h-10 border-2 border-yellow-400 border-t-transparent rounded-full mx-auto mb-4" />
-          <p className="text-gray-400">正在进入房间...</p>
-          {!connected && !fetching && (
-            <button onClick={() => navigate('/')} className="mt-4 text-yellow-400 underline text-sm">返回首页</button>
+          {fetching ? (
+            <>
+              <div className="animate-spin w-10 h-10 border-2 border-yellow-400 border-t-transparent rounded-full mx-auto mb-4" />
+              <p className="text-gray-400">正在进入房间...</p>
+            </>
+          ) : fetchFailed ? (
+            <>
+              <div className="text-4xl mb-3">⚠️</div>
+              <p className="text-gray-300 mb-1">房间加载失败</p>
+              <p className="text-gray-500 text-xs mb-4">网络异常或房间已解散</p>
+            </>
+          ) : (
+            <p className="text-gray-400">正在进入房间...</p>
           )}
+          <div className="mt-4 flex flex-col gap-2 items-center">
+            <button onClick={handleRetryFetch} className="text-yellow-400 underline text-sm">重试</button>
+            <button onClick={() => navigate('/')} className="text-gray-400 underline text-xs">返回首页</button>
+          </div>
         </div>
       </div>
     );

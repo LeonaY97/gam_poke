@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Card as CardType } from '../types/game';
 
 const SUIT_SYMBOLS: Record<string, string> = {
@@ -30,7 +31,7 @@ interface CardProps {
   dimmed?: boolean;
 }
 
-export default function CardView({ card, faceDown, small, highlight, deal, dimmed }: CardProps) {
+function CardView({ card, faceDown, small, highlight, deal, dimmed }: CardProps) {
   const animClass = deal ? 'card-deal' : 'card-enter';
   const dimClass = dimmed ? 'opacity-40 grayscale' : '';
   if (faceDown || !card) {
@@ -70,6 +71,8 @@ export default function CardView({ card, faceDown, small, highlight, deal, dimme
     </div>
   );
 }
+
+export default memo(CardView);
 
 export function EmptyCardSlot({ small }: { small?: boolean }) {
   return (

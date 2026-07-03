@@ -46,6 +46,10 @@ export default function HomePage() {
     }
 
     const timeout = setTimeout(() => { setConnecting(false); setConnectionError('连接超时，请确认服务器已启动'); }, 8000);
+    // 移除旧监听器避免堆积：每次 doConnect 都会新增 connect/connect_error 监听器，
+    // 不移除会导致一次 connect 事件触发 N 次回调（N = 连接尝试次数）
+    s.off('connect');
+    s.off('connect_error');
     s.on('connect', () => {
       clearTimeout(timeout);
       setConnecting(false);

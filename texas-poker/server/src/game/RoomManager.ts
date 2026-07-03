@@ -186,6 +186,11 @@ export class RoomManager {
     return this.rooms.get(roomCode) || null;
   }
 
+  /** 当前房间总数（测试用） */
+  getRoomCount(): number {
+    return this.rooms.size;
+  }
+
   listRooms(): RoomListItem[] {
     const list: RoomListItem[] = [];
     for (const room of this.rooms.values()) {

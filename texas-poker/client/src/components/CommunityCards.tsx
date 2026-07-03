@@ -1,7 +1,8 @@
+import { memo } from 'react';
 import CardView, { EmptyCardSlot } from './CardView';
 import { useGameStore } from '../stores/gameStore';
 
-export default function CommunityCards() {
+function CommunityCards() {
   const communityCards = useGameStore(s => s.communityCards);
   const gamePhase = useGameStore(s => s.gamePhase);
 
@@ -30,3 +31,7 @@ export default function CommunityCards() {
     </div>
   );
 }
+
+// memo 包装：GamePage 每次重渲染都会 createElement CommunityCards，
+// 加 memo 后 props 永远为空对象，浅比较永远 true，跳过函数调用
+export default memo(CommunityCards);

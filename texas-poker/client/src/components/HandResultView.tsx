@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { useSocket } from '../hooks/useSocket';
 import { useGameStore } from '../stores/gameStore';
 import CardView from './CardView';
@@ -14,10 +15,26 @@ function isInBestCards(card: Card, bestCards: Card[]): boolean {
   return bestCards.some(b => b.rank === card.rank && b.suit === card.suit);
 }
 
+/** 检测当前设备是否为手机端（触屏 + 窄屏） */
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => {
+      const w = window.innerWidth;
+      const isTouch = !window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+      setIsMobile(w < 768 || isTouch);
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+  return isMobile;
+}
+
 /** 带星标的牌面：参与组成牌型的牌加金色光晕 */
-function CardWithBadge({ card, highlight, faceDown }: { card?: Card; highlight: boolean; faceDown?: boolean }) {
+function CardWithBadge({ card, highlight, faceDown, delay }: { card?: Card; highlight: boolean; faceDown?: boolean; delay?: number }) {
   return (
-    <div className="relative">
+    <div className="relative" style={delay ? { animationDelay: `${delay}ms` } : undefined}>
       <CardView card={card} small highlight={highlight} faceDown={faceDown} />
       {highlight && !faceDown && (
         <span className="absolute -top-1.5 -right-1.5 text-yellow-400 text-xs drop-shadow-[0_0_3px_rgba(0,0,0,0.9)] z-10">★</span>
@@ -29,14 +46,20 @@ function CardWithBadge({ card, highlight, faceDown }: { card?: Card; highlight: 
 export default function HandResultView({ result, onClose }: HandResultViewProps) {
   const { getSocket } = useSocket();
   const playerId = useGameStore(s => s.playerId);
-  const room = useGameStore(s => s.room);
   const communityCards = useGameStore(s => s.communityCards);
-  const isHost = room?.hostId === playerId;
+  // 只订阅 hostId 而非整个 room：HandResultView 只需判断是否为房主，
+  // 订阅整个 room 会导致轮询/action_result 触发的 room 变化都重渲染所有 CardView
+  const isHost = useGameStore(s => s.room?.hostId === playerId);
 
   // 判断是否为"所有人都弃牌只剩一人"的单赢场景
   const isSingleWinnerByFold = result.winners.length === 1
     && result.winners[0]?.handDescription === '对手弃牌';
   const foldedCount = result.allHands.filter(h => h.isFolded).length;
+
+  // 手机端错开 CardView 动画：摊牌时一次性渲染 21 张 CardView 同时触发 card-enter，
+  // GPU 合成压力骤增。手机端用 animation-delay 错开 40ms，桌面端不延迟。
+  const isMobile = useIsMobile();
+  const cardDelay = (i: number) => (isMobile ? i * 40 : 0);
 
   const handleClose = () => {
     const ws = getSocket();
@@ -105,7 +128,7 @@ export default function HandResultView({ result, onClose }: HandResultViewProps)
             <div className="flex justify-center gap-1.5 py-2">
               {communityCards.map((c, i) => {
                 const isPartOfWin = isInBestCards(c, allWinnerBestCards);
-                return <CardWithBadge key={i} card={c} highlight={isPartOfWin} />;
+                return <CardWithBadge key={i} card={c} highlight={isPartOfWin} delay={cardDelay(i)} />;
               })}
             </div>
           </div>
@@ -131,6 +154,7 @@ export default function HandResultView({ result, onClose }: HandResultViewProps)
                     holeCards={winnerHoleCards}
                     showLayerTag={showLayerTag}
                     layerIndex={i + 1}
+                    baseDelay={cardDelay(communityCards.length + i * 2)}
                   />
                 );
               })}
@@ -181,14 +205,16 @@ export default function HandResultView({ result, onClose }: HandResultViewProps)
                           ? result.winners.find(w => w.playerId === h.playerId)?.cards || []
                           : [];
                         const highlight = isWinner && isInBestCards(c, winnerBestCards);
+                        const delayIdx = communityCards.length + result.winners.length * 2 + i * 2 + j;
                         return (
-                          <CardView
-                            key={j}
-                            card={c}
-                            small
-                            faceDown={h.isFolded}
-                            highlight={highlight}
-                          />
+                          <div key={j} style={isMobile ? { animationDelay: `${delayIdx * 40}ms` } : undefined}>
+                            <CardView
+                              card={c}
+                              small
+                              faceDown={h.isFolded}
+                              highlight={highlight}
+                            />
+                          </div>
                         );
                       })}
                     </div>
@@ -230,11 +256,13 @@ function WinnerRow({
   holeCards,
   showLayerTag,
   layerIndex,
+  baseDelay = 0,
 }: {
   winner: WinnerInfo;
   holeCards: Card[];
   showLayerTag: boolean;
   layerIndex: number;
+  baseDelay?: number;
 }) {
   return (
     <div className="bg-gradient-to-r from-yellow-500/10 to-amber-500/5 rounded-xl p-3 border border-yellow-500/30">
@@ -256,7 +284,7 @@ function WinnerRow({
         <div className="flex gap-0.5">
           {holeCards.map((c, i) => {
             const highlight = isInBestCards(c, winner.cards);
-            return <CardWithBadge key={i} card={c} highlight={highlight} />;
+            return <CardWithBadge key={i} card={c} highlight={highlight} delay={baseDelay + i * 40} />;
           })}
         </div>
         <div className="flex-1 text-right">

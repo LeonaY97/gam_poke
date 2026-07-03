@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useCallback, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useGameStore } from '../stores/gameStore';
+import { useShallow } from 'zustand/react/shallow';
 import { useSocket } from '../hooks/useSocket';
 import CardView from '../components/CardView';
 import PlayerSeat from '../components/PlayerSeat';
@@ -58,12 +59,24 @@ function OfflineCountdownBanner({ nickname, totalSeconds }: { nickname: string; 
   }, [totalSeconds]);
 
   return (
-    <div className="absolute top-10 left-0 right-0 z-50 flex justify-center pointer-events-none">
+    <div className="absolute top-2 left-0 right-0 z-50 flex justify-center pointer-events-none">
       <div className="bg-orange-600/80 backdrop-blur-sm border border-orange-300 rounded-full px-4 py-1.5 flex items-center gap-2 shadow-lg shadow-orange-500/40">
         <span className="w-2 h-2 bg-orange-200 rounded-full animate-ping" />
         <span className="text-white text-xs font-bold">
           等待离线玩家 <span className="text-yellow-100">{nickname}</span> 重连，{remain}s 后 AI 自动过牌
         </span>
+      </div>
+    </div>
+  );
+}
+
+/** ActionBar 加载占位条：轮到自己但 turnOptions 还没到时显示，避免用户以为卡死 */
+function ActionBarLoading() {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 border-t border-gray-700 p-3 z-50">
+      <div className="flex items-center justify-center gap-2 text-yellow-400 py-3">
+        <span className="animate-spin w-5 h-5 border-2 border-yellow-400 border-t-transparent rounded-full" />
+        <span className="text-sm font-bold">正在加载操作选项...</span>
       </div>
     </div>
   );
@@ -76,26 +89,23 @@ export default function GamePage() {
   const [fetching, setFetching] = useState(true);
   const [fetchTimeout, setFetchTimeout] = useState(false);
 
-  const inGame = useGameStore(s => s.inGame);
-  const room = useGameStore(s => s.room);
-  const playerId = useGameStore(s => s.playerId);
-  const myCards = useGameStore(s => s.myCards);
-  const isSpectator = useGameStore(s => s.isSpectator);
-  const spectatorHands = useGameStore(s => s.spectatorHands);
-  const communityCards = useGameStore(s => s.communityCards);
-  const gamePhase = useGameStore(s => s.gamePhase);
-  const pot = useGameStore(s => s.pot);
-  const lastAction = useGameStore(s => s.lastAction);
-  const handResult = useGameStore(s => s.handResult);
-  const borrowRequest = useGameStore(s => s.borrowRequest);
-  const finalSettlement = useGameStore(s => s.finalSettlement);
-  const offlineCountdown = useGameStore(s => s.offlineCountdown);
+  // 用 useShallow 合并订阅，避免 18 个独立订阅导致任一变化都触发全树重渲染
+  const {
+    inGame, room, playerId, myCards, isSpectator, spectatorHands,
+    communityCards, gamePhase, pot, lastAction, handResult,
+    borrowRequest, finalSettlement, offlineCountdown, connected, serverUrl,
+  } = useGameStore(useShallow(s => ({
+    inGame: s.inGame, room: s.room, playerId: s.playerId, myCards: s.myCards,
+    isSpectator: s.isSpectator, spectatorHands: s.spectatorHands,
+    communityCards: s.communityCards, gamePhase: s.gamePhase, pot: s.pot,
+    lastAction: s.lastAction, handResult: s.handResult, borrowRequest: s.borrowRequest,
+    finalSettlement: s.finalSettlement, offlineCountdown: s.offlineCountdown,
+    connected: s.connected, serverUrl: s.serverUrl,
+  })));
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [borrowing, setBorrowing] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const connected = useGameStore(s => s.connected);
-  const serverUrl = useGameStore(s => s.serverUrl);
 
   // fetching 逻辑：inGame/room 就绪则立即结束；否则 HTTP 拉取（带超时）
   // 依赖包含 inGame、room，确保 ack 后状态变化时重新检查
@@ -154,12 +164,14 @@ export default function GamePage() {
   }, [lastAction]);
 
   // HTTP 状态轮询兜底：socket 事件可能因网络抖动/静默断开而丢失，
-  // 每 4 秒从后端拉取一次 room 状态，发现 currentPlayerId/phase/pot 不一致就纠正。
+  // 定期从后端拉取 room 状态，发现 currentPlayerId/phase/pot 不一致就纠正。
   // 这是"卡在 XX 思考中"的终极兜底——即使 socket 完全失效，HTTP 轮询也能恢复 UI。
+  // 关键优化：socket 断开时 2s 轮询（快速恢复），正常时 6s（减少渲染压力）
   useEffect(() => {
-    if (!inGame || !roomId || !serverUrl) return;
+    if (!inGame || !roomId || !serverUrl || !gamePhase || gamePhase === 'waiting') return;
     const httpBase = serverUrl.replace(/\/+$/, '');
     let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
       if (cancelled) return;
@@ -172,12 +184,12 @@ export default function GamePage() {
         if (cancelled || !data.room) return;
         const serverRoom = data.room as RoomListItem;
         const st = useGameStore.getState();
-        // 同步 room（包含 players、game.pot、game.players 等）
-        st.setRoom(serverRoom);
-        // 关键：同步 currentPlayerId 和 phase（socket turn_changed 丢失时的兜底）
+        // 性能优化：用细粒度 setter 替代全量 setRoom
+        // 之前每次筹码/phase 变化都全量 setRoom → GamePage 整树重渲染 → 卡顿
         if (serverRoom.game) {
           const serverCurrentPlayerId = (serverRoom.game as any).currentPlayerId
             || serverRoom.game.players?.[(serverRoom.game as any).currentPlayerIndex]?.playerId;
+          // 关键：currentPlayerId 不一致时纠正（socket turn_changed 丢失的兜底）
           if (serverCurrentPlayerId && serverCurrentPlayerId !== st.currentPlayerId) {
             console.log('[轮询] 检测到 currentPlayerId 不一致，纠正:', st.currentPlayerId, '→', serverCurrentPlayerId);
             st.setCurrentPlayerId(serverCurrentPlayerId);
@@ -191,26 +203,149 @@ export default function GamePage() {
               ws.emit('reconnect_player', { playerId: st.playerId, roomCode: roomId }, () => {});
             }
           }
+          // phase 不一致时纠正
           if (serverRoom.game.phase !== st.gamePhase) {
             console.log('[轮询] 检测到 phase 不一致，纠正:', st.gamePhase, '→', serverRoom.game.phase);
             st.setGamePhase(serverRoom.game.phase);
           }
-          st.setPot(serverRoom.game.pot);
+          // pot 不一致时才更新（避免无变化的重渲染）
+          if (serverRoom.game.pot !== st.pot) {
+            st.setPot(serverRoom.game.pot);
+          }
+          // 细粒度更新玩家筹码：仅替换筹码变化的玩家对象，其他玩家引用保持不变
+          // 这样 PlayerSeat 的 areEqual 才能跳过未变化的座位
+          const localPlayers = st.room?.players || [];
+          const serverPlayers = serverRoom.players || [];
+          for (let i = 0; i < serverPlayers.length; i++) {
+            const sp = serverPlayers[i];
+            const lp = localPlayers[i];
+            if (sp && lp && sp.chips !== lp.chips) {
+              st.updatePlayerChips(sp.id, sp.chips);
+            }
+          }
+          // 细粒度更新 gamePlayers：先比较关键字段，只有真的变化才更新
+          // 服务器每次返回新数组引用，不能简单比较引用，必须比较内容
+          const localGame = st.room?.game;
+          if (localGame) {
+            const serverGame = serverRoom.game as any;
+            const localGPs = localGame.players || [];
+            const serverGPs = serverGame.players || [];
+            // 比较 gamePlayers 关键字段：currentBet/isFolded/isAllIn/isActive/totalBet
+            let gamePlayersContentChanged = localGPs.length !== serverGPs.length;
+            if (!gamePlayersContentChanged) {
+              for (let i = 0; i < serverGPs.length; i++) {
+                const sgp = serverGPs[i];
+                const lgp = localGPs[i];
+                if (!sgp || !lgp) { gamePlayersContentChanged = true; break; }
+                if (sgp.currentBet !== lgp.currentBet
+                  || sgp.totalBet !== lgp.totalBet
+                  || sgp.isFolded !== lgp.isFolded
+                  || sgp.isAllIn !== lgp.isAllIn
+                  || sgp.isActive !== lgp.isActive) {
+                  gamePlayersContentChanged = true;
+                  break;
+                }
+              }
+            }
+            const phaseChangedHere = serverGame.phase !== localGame.phase;
+            const potChangedHere = serverGame.pot !== localGame.pot;
+            // betHistory 比较：长度变化或最后一项不同
+            const localBH = localGame.betHistory || [];
+            const serverBH = serverGame.betHistory || [];
+            const betHistoryChanged = localBH.length !== serverBH.length
+              || (serverBH.length > 0 && JSON.stringify(localBH[localBH.length - 1]) !== JSON.stringify(serverBH[serverBH.length - 1]));
+            if (gamePlayersContentChanged || betHistoryChanged || phaseChangedHere || potChangedHere) {
+              st.updateGameState({
+                pot: serverGame.pot,
+                gamePlayers: serverGame.players,
+                betHistory: serverGame.betHistory,
+                phase: serverGame.phase,
+              });
+            }
+          }
+          // 玩家数变化（加入/离开）或首次拉取：仍然需要全量 setRoom
+          if (localPlayers.length !== serverPlayers.length) {
+            st.setRoom(serverRoom);
+          }
         }
       } catch {
         // 网络错误静默忽略，下次重试
       }
+      // 动态安排下次轮询：socket 断开时 2s（快速恢复），正常时 6s
+      if (!cancelled) {
+        const ws = getSocket();
+        const nextInterval = (!ws || !ws.connected) ? 2000 : 6000;
+        pollTimer = setTimeout(poll, nextInterval);
+      }
     };
 
-    const interval = setInterval(poll, 4000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [inGame, roomId, serverUrl]);
+    // 初始延迟 2s 后开始轮询（等 socket 事件先到）
+    pollTimer = setTimeout(poll, 2000);
+
+    // 切回前台时立即轮询（手机切后台 socket 暂停，回来要立即纠正状态）
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !cancelled) {
+        if (pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(poll, 200);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [inGame, roomId, serverUrl, getSocket]);
 
   const players = room?.players || [];
   const myIndex = players.findIndex(p => p.id === playerId);
   const dealerIndex = room?.game?.dealerIndex ?? 0;
   const currentPlayerId = useGameStore(s => s.currentPlayerId);
   const turnOptions = useGameStore(s => s.turnOptions);
+
+  // 关键修复：轮到自己但 turnOptions 为空时（your_turn 事件丢失/手机切后台错过），
+  // 立即主动 emit reconnect_player 请求后端重发回合，不依赖 6s 轮询（太慢）
+  // 并在 500ms 内未恢复时重试，最多重试 3 次
+  useEffect(() => {
+    if (!inGame || !playerId || !roomId || !serverUrl) return;
+    if (currentPlayerId !== playerId || turnOptions || isSpectator) return;
+    if (gamePhase === 'showdown' || gamePhase === 'waiting') return;
+
+    let retryCount = 0;
+    let cancelled = false;
+    const maxRetries = 3;
+
+    const tryRecover = () => {
+      if (cancelled) return;
+      const ws = getSocket();
+      if (!ws || !ws.connected) {
+        if (retryCount < maxRetries) {
+          retryCount++;
+          setTimeout(tryRecover, 1000);
+        }
+        return;
+      }
+      console.log(`[ActionBar 恢复] 第 ${retryCount + 1} 次请求重发回合`);
+      ws.emit('reconnect_player', { playerId, roomCode: roomId }, () => {
+        if (cancelled) return;
+        setTimeout(() => {
+          if (cancelled) return;
+          const st = useGameStore.getState();
+          if (st.currentPlayerId === playerId && !st.turnOptions && retryCount < maxRetries) {
+            retryCount++;
+            tryRecover();
+          }
+        }, 500);
+      });
+    };
+
+    const initialTimer = setTimeout(tryRecover, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(initialTimer);
+    };
+  }, [inGame, playerId, roomId, serverUrl, currentPlayerId, turnOptions, isSpectator, gamePhase, getSocket]);
 
   // 是否需要显示"等待其他玩家"：牌局进行中 + 不是自己的回合 + 不在结算
   const isWaitingForOthers = gamePhase !== 'showdown' && gamePhase !== 'waiting'
@@ -366,9 +501,9 @@ export default function GamePage() {
     : 'bg-gray-700';
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-poker-dark via-poker-felt to-poker-dark overflow-hidden relative">
-      {/* 顶部信息栏 */}
-      <div className="absolute top-0 left-0 right-0 bg-black/30 backdrop-blur-sm px-3 py-2 flex items-center justify-between z-40">
+    <div className="h-[100dvh] w-full overflow-hidden relative flex flex-col bg-gradient-to-b from-poker-dark via-poker-felt to-poker-dark">
+      {/* 顶部信息栏：relative 在文档流中，shrink-0 避免被压缩 */}
+      <div className="relative shrink-0 bg-black/30 backdrop-blur-sm px-3 py-2 flex items-center justify-between z-40">
         <button onClick={handleLeave} disabled={leaving} className="text-gray-400 hover:text-white text-sm px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
           {leaving && <span className="animate-spin w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full" />}
           {leaving ? '离开中...' : '← 离开'}
@@ -415,8 +550,8 @@ export default function GamePage() {
         return <OfflineCountdownBanner key={offlineCountdown.playerId} nickname={nick} totalSeconds={offlineCountdown.seconds} />;
       })()}
 
-      {/* 牌桌区域 */}
-      <div className="relative w-full h-screen pt-14 pb-28">
+      {/* 牌桌区域：flex-1 占据剩余高度，min-h-0 确保 flex 子项能正确收缩 */}
+      <div className="relative w-full flex-1 min-h-0 pb-32 sm:pb-28">
         {/* 椭圆桌面 */}
         <div className="absolute top-[14%] left-[4%] right-[4%] bottom-[26%] rounded-[40%] bg-gradient-to-b from-green-800 to-green-900 border-4 border-yellow-900/30 shadow-inner" />
         {/* 社区牌 */}
@@ -557,7 +692,7 @@ export default function GamePage() {
           );
           return (
             <div
-              className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center cursor-pointer"
+              className="absolute bottom-28 sm:bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center cursor-pointer"
               onClick={() => {
                 const me = players[myIndex];
                 if (me) setSelectedPlayer({ ...me });
@@ -626,10 +761,10 @@ export default function GamePage() {
         })()}
       </div>
 
-      {/* 借入弹框：仅在一局结束、下局开始前收到 borrow_request 时显示 */}
+      {/* 借入弹框：仅在一局结束、下局开始前收到 borrow_request 时显示，矮窗口可滚动 */}
       {borrowRequest && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-2xl p-6 max-w-sm w-full mx-4 border border-yellow-600/50 text-center">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 overflow-y-auto p-4">
+          <div className="bg-gray-800 rounded-2xl p-6 max-w-sm w-full border border-yellow-600/50 text-center my-auto">
             <div className="text-4xl mb-3">💸</div>
             <h2 className="text-xl font-bold text-white mb-2">筹码已用完</h2>
             <p className="text-gray-400 text-sm mb-4">
@@ -669,8 +804,12 @@ export default function GamePage() {
       {/* 音效设置弹窗 */}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
 
-      {/* 操作栏 */}
-      {inGame && turnOptions && !isSpectator && <ActionBar />}
+      {/* 操作栏：turnOptions 就绪时显示；轮到自己但 turnOptions 未到时显示加载占位条 */}
+      {inGame && !isSpectator && (
+        currentPlayerId === playerId && !turnOptions
+          ? <ActionBarLoading />
+          : turnOptions && <ActionBar />
+      )}
       <DanmakuBar />
       {handResult && <HandResultView result={handResult} onClose={() => useGameStore.getState().setHandResult(null)} />}
       {finalSettlement && (
